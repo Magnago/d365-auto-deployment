@@ -53,6 +53,8 @@ SYNC_TIMEOUT=1800000
 REPORTS_TIMEOUT=900000
 ```
 
+Set `SKIP_TFVC_MERGE_OPERATIONS=true` for environments where you want to bypass the descriptor update + TFVC merge step while still running build, sync, and report deployment.
+
 ### Environment Paths
 Configure environment paths in `config/environments.json`:
 

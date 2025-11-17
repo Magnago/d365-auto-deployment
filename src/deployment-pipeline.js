@@ -26,6 +26,7 @@ class DeploymentPipeline {
         this.enableBuildStep = this.getEnvFlag('ENABLE_BUILD_STEP', true);
         this.enableSyncStep = this.getEnvFlag('ENABLE_SYNC_STEP', true);
         this.enableReportsStep = this.getEnvFlag('ENABLE_REPORTS_STEP', true);
+        this.skipTfvcMergeOperations = this.getEnvFlag('SKIP_TFVC_MERGE_OPERATIONS', false);
 
         this.sourceBranchPath = `$/${this.projectName}/${this.sourceBranch}`;
         this.targetBranchPath = `$/${this.projectName}/${this.targetBranch}`;
@@ -100,7 +101,8 @@ class DeploymentPipeline {
                     throw new Error(mergeResult.message || 'TFVC merge failed');
                 }
 
-                if (!mergeResult.details?.hasChanges) {
+                const hasChanges = Boolean(mergeResult.details?.hasChanges);
+                if (!hasChanges && !this.skipTfvcMergeOperations) {
                     logger.info('No changes detected after merge, stopping pipeline');
                     this.results = this.buildResults(startTime, steps, { hasChanges: false, message: 'Pipeline completed - no changes to merge' });
                     await this.sendNotifications();

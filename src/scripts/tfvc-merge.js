@@ -33,6 +33,7 @@ class TFVCMerge {
         this.sourceLocalPath = null;
         this.targetLocalPath = null;
         this.lastVersionLabel = null;
+        this.skipMergeOperations = this.getBooleanEnv(process.env.SKIP_TFVC_MERGE_OPERATIONS, false);
 
         this.notificationService = new NotificationService();
         this.deploymentId = 'TFVC-' + new Date().toISOString().replace(/[:.]/g, '-');
@@ -52,11 +53,11 @@ class TFVCMerge {
                 targetBranch: this.targetBranchPath
             });
 
-            if (this.shouldNotify()) {
-                await this.notificationService.sendNotification('start', {
-                    deploymentId: this.deploymentId,
-                    stepName: 'TFVC Merge',
-                    environmentType: 'TFVC Merge',
+        if (this.shouldNotify()) {
+            await this.notificationService.sendNotification('start', {
+                deploymentId: this.deploymentId,
+                stepName: 'TFVC Merge',
+                environmentType: 'TFVC Merge',
                     model: this.modelName,
                     sourceBranch: this.sourceBranch,
                     targetBranch: this.targetBranch
@@ -68,9 +69,27 @@ class TFVCMerge {
             await this.getLatestBranch(this.sourceBranchPath, 'source');
             await this.getLatestBranch(this.targetBranchPath, 'target');
 
-            await this.handleVersionBumpIfNeeded();
+            let mergeResult;
+            if (this.skipMergeOperations) {
+                logger.info('Skipping TFVC merge and descriptor update due to SKIP_TFVC_MERGE_OPERATIONS flag', {
+                    workspace: this.workspaceName
+                });
 
-            const mergeResult = await this.performMerge();
+                mergeResult = {
+                    success: true,
+                    message: 'TFVC merge skipped via SKIP_TFVC_MERGE_OPERATIONS',
+                    details: {
+                        skipped: true,
+                        reason: 'SKIP_TFVC_MERGE_OPERATIONS=true',
+                        hasChanges: true,
+                        sourceRefreshed: true,
+                        targetRefreshed: true
+                    }
+                };
+            } else {
+                await this.handleVersionBumpIfNeeded();
+                mergeResult = await this.performMerge();
+            }
 
             if (this.shouldNotify()) {
                 await this.notificationService.sendNotification('success', {
@@ -771,6 +790,23 @@ class TFVCMerge {
 
     shouldNotify() {
         return process.env.SUPPRESS_STEP_NOTIFICATIONS !== 'true';
+    }
+
+    getBooleanEnv(value, defaultValue = false) {
+        if (value === undefined || value === null || value === '') {
+            return defaultValue;
+        }
+
+        const normalized = value.toString().trim().toLowerCase();
+        if (['1', 'true', 'yes', 'on'].includes(normalized)) {
+            return true;
+        }
+
+        if (['0', 'false', 'no', 'off'].includes(normalized)) {
+            return false;
+        }
+
+        return defaultValue;
     }
 }
 
