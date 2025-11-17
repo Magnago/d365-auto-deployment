@@ -102,6 +102,9 @@ class D365Reports {
                 throw new Error(`Reports deployment script not found: ${reportsScript}`);
             }
 
+            // Ensure registry points to the correct package directory (cloud envs often missing BinDir)
+            await this.ensureDeploymentRegistry(paths);
+
             // Prepare PowerShell command directly
             const packagesPath = paths.packages;
 
@@ -164,6 +167,33 @@ class D365Reports {
             logger.failStep('D365 Reports Deployment', error);
             throw error;
         }
+    }
+
+    async ensureDeploymentRegistry(paths) {
+        const registryPath = 'HKLM:\\SOFTWARE\\Microsoft\\Dynamics\\Deployment';
+        const psCommand = `
+            try {
+                New-Item -Path "${registryPath}" -Force | Out-Null
+                New-ItemProperty -Path "${registryPath}" -Name "BinDir" -Value "${paths.packages}" -PropertyType String -Force | Out-Null
+                New-ItemProperty -Path "${registryPath}" -Name "InstallDir" -Value "${paths.packages}" -PropertyType String -Force | Out-Null
+                Write-Output "Registry updated"
+            } catch {
+                Write-Error $_.Exception.Message
+                exit 1
+            }
+        `;
+
+        logger.info('Ensuring Dynamics deployment registry keys exist', {
+            registryPath,
+            binDir: paths.packages
+        });
+
+        await this.psRunner.execute(psCommand, {
+            executionPolicy: 'Bypass',
+            logOutput: false,
+            nonInteractive: true,
+            timeout: 30000
+        });
     }
 
     /**
