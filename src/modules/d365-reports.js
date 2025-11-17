@@ -2,6 +2,10 @@
 const fs = require('fs-extra');
 const PowerShellRunner = require('../core/powershell-runner');
 const logger = require('../core/logger');
+const { promisify } = require('util');
+const { execFile } = require('child_process');
+
+const execFileAsync = promisify(execFile);
 
 class D365Reports {
     constructor() {
@@ -170,30 +174,40 @@ class D365Reports {
     }
 
     async ensureDeploymentRegistry(paths) {
-        const registryPath = 'HKLM:\\SOFTWARE\\Microsoft\\Dynamics\\Deployment';
-        const psCommand = `
-            try {
-                New-Item -Path "${registryPath}" -Force | Out-Null
-                New-ItemProperty -Path "${registryPath}" -Name "BinDir" -Value "${paths.packages}" -PropertyType String -Force | Out-Null
-                New-ItemProperty -Path "${registryPath}" -Name "InstallDir" -Value "${paths.packages}" -PropertyType String -Force | Out-Null
-                Write-Output "Registry updated"
-            } catch {
-                Write-Error $_.Exception.Message
-                exit 1
-            }
-        `;
+        const registryViews = ['64', '32'];
+        const registryPath = 'HKLM\\SOFTWARE\\Microsoft\\Dynamics\\Deployment';
+        const binDir = paths.packages;
 
         logger.info('Ensuring Dynamics deployment registry keys exist', {
-            registryPath,
-            binDir: paths.packages
+            binDir
         });
 
-        await this.psRunner.execute(psCommand, {
-            executionPolicy: 'Bypass',
-            logOutput: false,
-            nonInteractive: true,
-            timeout: 30000
-        });
+        for (const view of registryViews) {
+            await this.updateRegistryValue(registryPath, view, 'BinDir', binDir);
+            await this.updateRegistryValue(registryPath, view, 'InstallDir', binDir);
+        }
+    }
+
+    async updateRegistryValue(registryPath, view, valueName, valueData) {
+        const args = [
+            'ADD',
+            registryPath,
+            '/v', valueName,
+            '/t', 'REG_SZ',
+            '/d', valueData,
+            '/f',
+            `/reg:${view}`
+        ];
+
+        try {
+            await execFileAsync('reg.exe', args, {
+                windowsHide: true
+            });
+        } catch (error) {
+            const stderr = error?.stderr ? error.stderr.toString().trim() : '';
+            const message = stderr || error.message;
+            throw new Error(`Failed to set ${valueName} for registry view ${view}: ${message}`);
+        }
     }
 
     /**
