@@ -43,8 +43,10 @@ class DeploymentPipeline {
             'net start SQLServerReportingServices',
             'net start DynamicsAxBatch',
             'net start Microsoft.Dynamics.AX.Framework.Tools.DMF.SSISHelperService.exe',
-            'net start MR2012ProcessService'
+            'net start MR2012ProcessService',
+            'iisreset /start'
         ]);
+        this.serviceCommandTimeout = this.getNumericEnv('SERVICE_COMMAND_TIMEOUT_MS', 5 * 60 * 1000);
 
         this.sourceBranchPath = `$/${this.projectName}/${this.sourceBranch}`;
         this.targetBranchPath = `$/${this.projectName}/${this.targetBranch}`;
@@ -392,6 +394,20 @@ class DeploymentPipeline {
             .filter(Boolean);
     }
 
+    getNumericEnv(varName, defaultValue) {
+        const rawValue = process.env[varName];
+        if (rawValue === undefined || rawValue === null || rawValue === '') {
+            return defaultValue;
+        }
+
+        const parsed = Number(rawValue);
+        if (Number.isFinite(parsed) && parsed >= 0) {
+            return parsed;
+        }
+
+        return defaultValue;
+    }
+
     async manageServices(action) {
         const commands = action === 'stop' ? this.serviceStopCommands : this.serviceStartCommands;
         if (!commands.length) {
@@ -405,8 +421,9 @@ class DeploymentPipeline {
 
         const executed = [];
         for (const command of commands) {
-            await this.runServiceCommand(command, action);
-            executed.push(command);
+            const preparedCommand = this.prepareServiceCommand(command, action);
+            await this.runServiceCommand(preparedCommand, action, command);
+            executed.push(preparedCommand);
         }
 
         const verb = action === 'stop' ? 'Stopped' : 'Started';
@@ -416,10 +433,38 @@ class DeploymentPipeline {
         };
     }
 
-    async runServiceCommand(command, action) {
-        logger.info('Executing service command', { action, command });
+    prepareServiceCommand(command, action) {
+        if (!command || typeof command !== 'string') {
+            return command;
+        }
+
+        let prepared = command.trim();
+        if (!prepared) {
+            return prepared;
+        }
+
+        if (action === 'stop') {
+            const netStopPattern = /^net\s+stop\b/i;
+            const hasAutoConfirm = /\s\/y(\s|$)/i.test(prepared);
+            if (netStopPattern.test(prepared) && !hasAutoConfirm) {
+                prepared = `${prepared} /y`;
+            }
+        }
+
+        return prepared;
+    }
+
+    async runServiceCommand(command, action, originalCommand = null) {
+        const logPayload = { action, command };
+        if (originalCommand && originalCommand !== command) {
+            logPayload.originalCommand = originalCommand;
+        }
+        logger.info('Executing service command', logPayload);
         try {
-            const { stdout, stderr } = await execAsync(command, { windowsHide: true });
+            const { stdout, stderr } = await execAsync(command, {
+                windowsHide: true,
+                timeout: this.serviceCommandTimeout
+            });
             if (stdout?.trim()) {
                 logger.debug('Service command output', { command, output: stdout.trim() });
             }
@@ -427,6 +472,12 @@ class DeploymentPipeline {
                 logger.debug('Service command warnings', { command, output: stderr.trim() });
             }
         } catch (error) {
+            const timedOut = (error.killed && error.signal === 'SIGTERM')
+                || /timed out/i.test(error.message || '');
+            if (timedOut) {
+                throw new Error(`${action === 'stop' ? 'Stop' : 'Start'} command timed out (${command}) after ${this.serviceCommandTimeout}ms`);
+            }
+
             const output = [error.stderr, error.stdout, error.message]
                 .filter(Boolean)
                 .map(value => value.toString().trim())

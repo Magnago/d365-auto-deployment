@@ -47,7 +47,8 @@ TFVC_ALLOW_INTEGRATED_AUTH_FALLBACK=false
 # (Default: true) set to false only if you need to skip service control
 ENABLE_SERVICE_CONTROL=true
 SERVICE_STOP_COMMANDS=net stop W3SVC,net stop SQLServerReportingServices,net stop DynamicsAxBatch,net stop Microsoft.Dynamics.AX.Framework.Tools.DMF.SSISHelperService.exe,net stop MR2012ProcessService
-SERVICE_START_COMMANDS=net start W3SVC,net start SQLServerReportingServices,net start DynamicsAxBatch,net start Microsoft.Dynamics.AX.Framework.Tools.DMF.SSISHelperService.exe,net start MR2012ProcessService
+SERVICE_START_COMMANDS=net start W3SVC,net start SQLServerReportingServices,net start DynamicsAxBatch,net start Microsoft.Dynamics.AX.Framework.Tools.DMF.SSISHelperService.exe,net start MR2012ProcessService,iisreset /start
+SERVICE_COMMAND_TIMEOUT_MS=300000
 
 # D365 Configuration
 D365_MODEL=YourD365Model
@@ -60,7 +61,7 @@ REPORTS_TIMEOUT=900000
 ```
 
 Set `SKIP_TFVC_MERGE_OPERATIONS=true` for environments where you want to bypass the descriptor update + TFVC merge step while still running build, sync, and report deployment.  
-Service control is enabled by default; only set `ENABLE_SERVICE_CONTROL=false` if you explicitly do **not** want the pipeline to call `SERVICE_STOP_COMMANDS` before TFVC operations (to avoid locked DLLs) and `SERVICE_START_COMMANDS` after the pipeline finishes (even if it fails). Both command lists accept comma/semicolon/pipe separated values and default to the IIS, SSRS, batch, DMF helper, and MR services shown above.
+Service control is enabled by default; only set `ENABLE_SERVICE_CONTROL=false` if you explicitly do **not** want the pipeline to call `SERVICE_STOP_COMMANDS` before TFVC operations (to avoid locked DLLs) and `SERVICE_START_COMMANDS` after the pipeline finishes (even if it fails). Both command lists accept comma/semicolon/pipe separated values and default to the IIS, SSRS, batch, DMF helper, and MR services shown above. The runner automatically adds `/y` to any `net stop ...` commands so dependency prompts do not hang unattended, and every service command inherits the `SERVICE_COMMAND_TIMEOUT_MS` (default 5 minutes) safeguard.
 
 ### Environment Paths
 Configure environment paths in `config/environments.json`:
