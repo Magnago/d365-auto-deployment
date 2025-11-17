@@ -1,0 +1,16 @@
+{
+  "local": {
+    "aosService": "C:\\AosService",
+    "packages": "C:\\AosService\\PackagesLocalDirectory",
+    "webRoot": "C:\\AosService\\webroot",
+    "binPath": "C:\\AosService\\PackagesLocalDirectory\\bin",
+    "reportsScriptPath": "C:\\AosService\\PackagesLocalDirectory\\Plugins\\AxReportVmRoleStartupTask\\DeployAllReportsToSSRS.ps1"
+  },
+  "cloud": {
+    "aosService": "K:\\AosService",
+    "packages": "K:\\AosService\\PackagesLocalDirectory",
+    "webRoot": "K:\\AosService\\webroot",
+    "binPath": "K:\\AosService\\PackagesLocalDirectory\\bin",
+    "reportsScriptPath": "K:\\AosService\\PackagesLocalDirectory\\Plugins\\AxReportVmRoleStartupTask\\DeployAllReportsToSSRS.ps1"
+  }
+}

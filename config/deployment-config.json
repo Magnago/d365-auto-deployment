@@ -1,0 +1,22 @@
+{
+  "notifications": {
+    "onStart": {
+      "enabled": true,
+      "channels": ["teams"],
+      "includeDetails": true,
+      "includeLogs": false
+    },
+    "onSuccess": {
+      "enabled": true,
+      "channels": ["teams"],
+      "includeDetails": true,
+      "includeLogs": false
+    },
+    "onFailure": {
+      "enabled": true,
+      "channels": ["teams"],
+      "includeDetails": true,
+      "includeLogs": true
+    }
+  }
+}
