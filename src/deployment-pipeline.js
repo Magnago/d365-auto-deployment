@@ -82,7 +82,7 @@ class DeploymentPipeline {
                 sourceBranch: this.sourceBranch,
                 targetBranch: this.targetBranch,
                 steps: [
-                    'Update YourD365Model Version',
+                    'Update D365Model Version',
                     'Merge Tickets',
                     'Full Build',
                     'Database Sync',

@@ -19,7 +19,10 @@ class TFVCMerge {
         this.rawUsername = process.env.TFVC_USERNAME || process.env.TFVC_LOGIN || 'buildsvc';
         this.username = this.rawUsername;
         this.password = process.env.TFVC_PAT || process.env.TFVC_PASSWORD || process.env.AZURE_PAT;
-        this.workspaceName = process.env.TFVC_WORKSPACE;
+        const workspaceName = process.env.TFVC_WORKSPACE;
+        this.workspaceName = workspaceName ? workspaceName.trim() : workspaceName;
+        const workspaceOwner = process.env.TFVC_WORKSPACE_OWNER;
+        this.workspaceOwner = workspaceOwner ? workspaceOwner.trim() : null;
         this.useCachedAuthOnly = process.env.TFVC_USE_CACHED_AUTH_ONLY === 'true';
         this.forceLoginCommands = new Set(['checkin']);
 
@@ -142,13 +145,32 @@ class TFVCMerge {
             '/noprompt'
         ], { allowEmpty: true });
 
-        if (!workspaceList.stdout.toLowerCase().includes(this.workspaceName.toLowerCase())) {
+        const workspaceInfo = this.findWorkspaceInfo(workspaceList.stdout);
+        if (!workspaceInfo && !workspaceList.stdout.toLowerCase().includes(this.workspaceName.toLowerCase())) {
             throw new Error(`Workspace "${this.workspaceName}" not found on this machine. Please create or switch to the correct TFVC workspace before rerunning the deployment script.`);
+        }
+
+        if (!this.workspaceOwner && workspaceInfo && workspaceInfo.owner) {
+            this.workspaceOwner = workspaceInfo.owner;
+            logger.info('Detected TFVC workspace owner from local configuration', {
+                workspace: this.workspaceName,
+                owner: this.workspaceOwner
+            });
+        } else if (this.workspaceOwner && workspaceInfo && workspaceInfo.owner) {
+            const configured = this.workspaceOwner.trim().toLowerCase();
+            const detected = workspaceInfo.owner.trim().toLowerCase();
+            if (configured !== detected) {
+                logger.warn('TFVC workspace owner configured via TFVC_WORKSPACE_OWNER differs from detected owner', {
+                    workspace: this.workspaceName,
+                    configuredOwner: this.workspaceOwner,
+                    detectedOwner: workspaceInfo.owner
+                });
+            }
         }
 
         const mappings = await this.executeTfCommand([
             'workfold',
-            `/workspace:${this.workspaceName}`,
+            `/workspace:${this.buildWorkspaceSpecifier()}`,
             `/collection:${this.collectionUrl}`
         ], { allowEmpty: true });
 
@@ -403,6 +425,56 @@ class TFVCMerge {
             ...args,
             `/collection:${this.collectionUrl}`
         ];
+    }
+
+    buildWorkspaceSpecifier() {
+        if (this.workspaceOwner) {
+            return `${this.workspaceName};${this.workspaceOwner}`;
+        }
+        return this.workspaceName;
+    }
+
+    findWorkspaceInfo(output = '') {
+        if (!output || !this.workspaceName) {
+            return null;
+        }
+
+        const target = this.workspaceName.trim().toLowerCase();
+        const lines = output.split(/\r?\n/);
+
+        for (const rawLine of lines) {
+            const line = rawLine.trim();
+            if (!line ||
+                /^collection:/i.test(line) ||
+                /^workspace/i.test(line) ||
+                /^owner/i.test(line) ||
+                /^-+$/.test(line)) {
+                continue;
+            }
+
+            const columns = line
+                .split(/\s{2,}|\t+/)
+                .map(col => col.trim())
+                .filter(Boolean);
+
+            if (!columns.length) {
+                continue;
+            }
+
+            const workspace = columns[0].toLowerCase();
+            if (workspace !== target) {
+                continue;
+            }
+
+            return {
+                name: columns[0],
+                owner: columns[1] ? columns[1].trim() : null,
+                computer: columns[2] || null,
+                rawLine
+            };
+        }
+
+        return null;
     }
 
     buildUsernameVariants() {

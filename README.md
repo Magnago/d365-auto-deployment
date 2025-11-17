@@ -41,6 +41,8 @@ TFVC_PROJECT_NAME=YourTFVCProject
 SOURCE_BRANCH=Dev
 TARGET_BRANCH=Dev-test
 TFVC_WORKSPACE=AutoDeploymentWorkspace
+# Optional when the workspace is owned by another account
+TFVC_WORKSPACE_OWNER=YourDomain\ServiceAccount
 TFVC_ALLOW_INTEGRATED_AUTH_FALLBACK=false
 
 # D365 Configuration
@@ -75,7 +77,7 @@ Configure environment paths in `config/environments.json`:
 }
 ```
 
-> **Note:** When a Personal Access Token (PAT) is available, set `TFVC_PAT` (or point `TFVC_PASSWORD` to the PAT) so the automated merge can authenticate without relying on an existing Visual Studio session. Before running `npm run tfvc`, open Visual Studio (or `tf.exe`) and make sure the workspace defined by `TFVC_WORKSPACE` already exists locally with both `$/{project}/${SOURCE_BRANCH}` and `$/{project}/${TARGET_BRANCH}` mapped. The script now validates those mappings and fails (with a Teams notification) if the workspace is missing or incomplete, and it will stop immediately (also notifying Teams) if `tf merge` surfaces any conflicts so you can resolve them manually.
+> **Note:** When a Personal Access Token (PAT) is available, set `TFVC_PAT` (or point `TFVC_PASSWORD` to the PAT) so the automated merge can authenticate without relying on an existing Visual Studio session. Before running `npm run tfvc`, open Visual Studio (or `tf.exe`) and make sure the workspace defined by `TFVC_WORKSPACE` already exists locally with both `$/{project}/${SOURCE_BRANCH}` and `$/{project}/${TARGET_BRANCH}` mapped. The script now validates those mappings (and auto-detects the workspace owner, or you can override it via `TFVC_WORKSPACE_OWNER`) and fails (with a Teams notification) if the workspace is missing or incomplete, and it will stop immediately (also notifying Teams) if `tf merge` surfaces any conflicts so you can resolve them manually.
 
 ## 🚀 Quick Start
 

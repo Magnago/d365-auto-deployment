@@ -508,8 +508,27 @@ class NotificationService {
         }
     }
     formatSteps(data = {}) {
+        const normalizeStepName = (step) => {
+            if (!step) {
+                return '';
+            }
+            if (typeof step === 'string') {
+                return step.trim();
+            }
+            if (typeof step === 'object') {
+                const name = step.name || step.title || step.stepName || step.label;
+                return typeof name === 'string' ? name.trim() : '';
+            }
+            return '';
+        };
+
         if (Array.isArray(data.steps) && data.steps.length) {
-            return data.steps.join(', ');
+            const normalizedSteps = data.steps
+                .map(normalizeStepName)
+                .filter(Boolean);
+            if (normalizedSteps.length) {
+                return normalizedSteps.join(', ');
+            }
         }
 
         if (Array.isArray(data.stepName) && data.stepName.length) {
