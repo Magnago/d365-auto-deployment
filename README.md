@@ -44,6 +44,10 @@ TFVC_WORKSPACE=AutoDeploymentWorkspace
 # Optional when the workspace is owned by another account
 TFVC_WORKSPACE_OWNER=YourDomain\ServiceAccount
 TFVC_ALLOW_INTEGRATED_AUTH_FALLBACK=false
+# (Default: true) set to false only if you need to skip service control
+ENABLE_SERVICE_CONTROL=true
+SERVICE_STOP_COMMANDS=net stop W3SVC,net stop SQLServerReportingServices,net stop DynamicsAxBatch,net stop Microsoft.Dynamics.AX.Framework.Tools.DMF.SSISHelperService.exe,net stop MR2012ProcessService
+SERVICE_START_COMMANDS=net start W3SVC,net start SQLServerReportingServices,net start DynamicsAxBatch,net start Microsoft.Dynamics.AX.Framework.Tools.DMF.SSISHelperService.exe,net start MR2012ProcessService
 
 # D365 Configuration
 D365_MODEL=YourD365Model
@@ -55,7 +59,8 @@ SYNC_TIMEOUT=1800000
 REPORTS_TIMEOUT=900000
 ```
 
-Set `SKIP_TFVC_MERGE_OPERATIONS=true` for environments where you want to bypass the descriptor update + TFVC merge step while still running build, sync, and report deployment.
+Set `SKIP_TFVC_MERGE_OPERATIONS=true` for environments where you want to bypass the descriptor update + TFVC merge step while still running build, sync, and report deployment.  
+Service control is enabled by default; only set `ENABLE_SERVICE_CONTROL=false` if you explicitly do **not** want the pipeline to call `SERVICE_STOP_COMMANDS` before TFVC operations (to avoid locked DLLs) and `SERVICE_START_COMMANDS` after the pipeline finishes (even if it fails). Both command lists accept comma/semicolon/pipe separated values and default to the IIS, SSRS, batch, DMF helper, and MR services shown above.
 
 ### Environment Paths
 Configure environment paths in `config/environments.json`:
@@ -133,12 +138,14 @@ Copy the resulting `dist/d365-auto-deployment.exe`, your `.env`, and the `config
 
 The automated pipeline executes these steps in sequence:
 
-1. **Workspace Setup**: Check/create TFVC workspace and map branches
-2. **Source Merge**: Merge changes from source to target branch
-3. **D365 Build**: Compile the specified model using xppc.exe
-4. **Database Sync**: Synchronize database schema using SyncEngine.exe
-5. **Report Deployment**: Deploy SSRS reports for the model
-6. **Notifications**: Send deployment status via email
+1. **Stop Services (optional)**: Runs `SERVICE_STOP_COMMANDS` (typically IIS/SSRS/Batch/DMF/MR) to release locks before TFVC operations.
+2. **Workspace Setup**: Check/create TFVC workspace and map branches.
+3. **Source Merge**: Merge changes from source to target branch.
+4. **D365 Build**: Compile the specified model using xppc.exe.
+5. **Database Sync**: Synchronize database schema using SyncEngine.exe.
+6. **Report Deployment**: Deploy SSRS reports for the model.
+7. **Start Services (always attempted)**: Runs `SERVICE_START_COMMANDS` to bring services back up even when earlier steps fail.
+8. **Notifications**: Send deployment status via email.
 
 ## 📊 Monitoring & Logging
 

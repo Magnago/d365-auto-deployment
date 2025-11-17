@@ -5,6 +5,9 @@ const SyncOnly = require('./scripts/sync-only');
 const ReportsOnly = require('./scripts/reports-only');
 const logger = require('./core/logger');
 const NotificationService = require('./core/notification-service');
+const { exec } = require('child_process');
+const { promisify } = require('util');
+const execAsync = promisify(exec);
 
 class DeploymentPipeline {
     constructor() {
@@ -27,6 +30,21 @@ class DeploymentPipeline {
         this.enableSyncStep = this.getEnvFlag('ENABLE_SYNC_STEP', true);
         this.enableReportsStep = this.getEnvFlag('ENABLE_REPORTS_STEP', true);
         this.skipTfvcMergeOperations = this.getEnvFlag('SKIP_TFVC_MERGE_OPERATIONS', false);
+        this.enableServiceControl = this.getEnvFlag('ENABLE_SERVICE_CONTROL', true);
+        this.serviceStopCommands = this.getServiceCommands('SERVICE_STOP_COMMANDS', [
+            'net stop W3SVC',
+            'net stop SQLServerReportingServices',
+            'net stop DynamicsAxBatch',
+            'net stop Microsoft.Dynamics.AX.Framework.Tools.DMF.SSISHelperService.exe',
+            'net stop MR2012ProcessService'
+        ]);
+        this.serviceStartCommands = this.getServiceCommands('SERVICE_START_COMMANDS', [
+            'net start W3SVC',
+            'net start SQLServerReportingServices',
+            'net start DynamicsAxBatch',
+            'net start Microsoft.Dynamics.AX.Framework.Tools.DMF.SSISHelperService.exe',
+            'net start MR2012ProcessService'
+        ]);
 
         this.sourceBranchPath = `$/${this.projectName}/${this.sourceBranch}`;
         this.targetBranchPath = `$/${this.projectName}/${this.targetBranch}`;
@@ -34,6 +52,7 @@ class DeploymentPipeline {
 
         this.startTime = null;
         this.results = null;
+        this.serviceStartStepRecorded = false;
     }
 
     generateDeploymentId() {
@@ -60,8 +79,11 @@ class DeploymentPipeline {
     }
 
     async execute() {
+        this.serviceStartStepRecorded = false;
         const startTime = Date.now();
         const steps = [];
+        let skipRemainingSteps = false;
+        let extraResults = {};
         const originalSuppression = process.env.SUPPRESS_STEP_NOTIFICATIONS;
         process.env.SUPPRESS_STEP_NOTIFICATIONS = 'true';
 
@@ -82,13 +104,25 @@ class DeploymentPipeline {
                 sourceBranch: this.sourceBranch,
                 targetBranch: this.targetBranch,
                 steps: [
-                    'Update D365Model Version',
+                    'Stop Services',
+                    'Update D365 Model Version',
                     'Merge Tickets',
                     'Full Build',
                     'Database Sync',
-                    'Deploy Reports'
+                    'Deploy Reports',
+                    'Start Services'
                 ]
             });
+
+            if (this.enableServiceControl) {
+                const stopResult = await this.executeStep('Stop Services', () => this.manageServices('stop'));
+                steps.push(stopResult);
+                if (!stopResult.success) {
+                    throw new Error(stopResult.message || 'Failed to stop services');
+                }
+            } else {
+                steps.push(this.createSkippedStep('Stop Services', 'ENABLE_SERVICE_CONTROL=false'));
+            }
 
             // TFVC merge
             const mergeResult = this.enableTfvcStep
@@ -104,45 +138,58 @@ class DeploymentPipeline {
                 const hasChanges = Boolean(mergeResult.details?.hasChanges);
                 if (!hasChanges && !this.skipTfvcMergeOperations) {
                     logger.info('No changes detected after merge, stopping pipeline');
-                    this.results = this.buildResults(startTime, steps, { hasChanges: false, message: 'Pipeline completed - no changes to merge' });
-                    await this.sendNotifications();
-                    this.generateSummary();
-                    return this.results;
+                    skipRemainingSteps = true;
+                    extraResults = { hasChanges: false, message: 'Pipeline completed - no changes to merge' };
                 }
             }
 
-            // Build
-            const buildResult = this.enableBuildStep
-                ? await this.executeStep('Build Model', () => this.buildOnly.execute())
-                : this.createSkippedStep('Build Model', 'ENABLE_BUILD_STEP=false');
-            steps.push(buildResult);
-            if (this.enableBuildStep && !buildResult.success) {
-                throw new Error(buildResult.message || 'Build failed');
+            if (!skipRemainingSteps) {
+                // Build
+                const buildResult = this.enableBuildStep
+                    ? await this.executeStep('Build Model', () => this.buildOnly.execute())
+                    : this.createSkippedStep('Build Model', 'ENABLE_BUILD_STEP=false');
+                steps.push(buildResult);
+                if (this.enableBuildStep && !buildResult.success) {
+                    throw new Error(buildResult.message || 'Build failed');
+                }
+
+                // Sync
+                const syncResult = this.enableSyncStep
+                    ? await this.executeStep('Database Sync', () => this.syncOnly.execute())
+                    : this.createSkippedStep('Database Sync', 'ENABLE_SYNC_STEP=false');
+                steps.push(syncResult);
+                if (this.enableSyncStep && !syncResult.success) {
+                    throw new Error(syncResult.message || 'Database sync failed');
+                }
+
+                // Reports
+                const reportsResult = this.enableReportsStep
+                    ? await this.executeStep('Deploy Reports', () => this.reportsOnly.execute())
+                    : this.createSkippedStep('Deploy Reports', 'ENABLE_REPORTS_STEP=false');
+                steps.push(reportsResult);
+                if (this.enableReportsStep && !reportsResult.success) {
+                    throw new Error(reportsResult.message || 'Report deployment failed');
+                }
             }
 
-            // Sync
-            const syncResult = this.enableSyncStep
-                ? await this.executeStep('Database Sync', () => this.syncOnly.execute())
-                : this.createSkippedStep('Database Sync', 'ENABLE_SYNC_STEP=false');
-            steps.push(syncResult);
-            if (this.enableSyncStep && !syncResult.success) {
-                throw new Error(syncResult.message || 'Database sync failed');
-            }
+            await this.runServiceStartStep(steps, { throwOnFailure: true });
 
-            // Reports
-            const reportsResult = this.enableReportsStep
-                ? await this.executeStep('Deploy Reports', () => this.reportsOnly.execute())
-                : this.createSkippedStep('Deploy Reports', 'ENABLE_REPORTS_STEP=false');
-            steps.push(reportsResult);
-            if (this.enableReportsStep && !reportsResult.success) {
-                throw new Error(reportsResult.message || 'Report deployment failed');
-            }
-
-            this.results = this.buildResults(startTime, steps);
+            this.results = this.buildResults(startTime, steps, extraResults);
             await this.sendNotifications();
             this.generateSummary();
             return this.results;
         } catch (error) {
+            const failedStepBeforeRecovery = this.currentStep;
+            try {
+                await this.runServiceStartStep(steps, { throwOnFailure: false });
+            } catch (serviceError) {
+                logger.error('Failed to restart services during error handling', {
+                    deploymentId: this.deploymentId,
+                    error: serviceError.message
+                });
+            }
+            this.currentStep = failedStepBeforeRecovery;
+
             logger.error('Deployment pipeline failed', {
                 deploymentId: this.deploymentId,
                 error: error.message,
@@ -333,6 +380,125 @@ class DeploymentPipeline {
         return defaultValue;
     }
 
+    getServiceCommands(varName, defaultList = []) {
+        const rawValue = process.env[varName];
+        if (!rawValue || !rawValue.trim()) {
+            return [...defaultList];
+        }
+
+        return rawValue
+            .split(/\r?\n|[,;|]+/)
+            .map(entry => entry.trim())
+            .filter(Boolean);
+    }
+
+    async manageServices(action) {
+        const commands = action === 'stop' ? this.serviceStopCommands : this.serviceStartCommands;
+        if (!commands.length) {
+            const message = `No services configured to ${action}`;
+            logger.info(message, { action });
+            return {
+                message,
+                details: { commandsExecuted: [] }
+            };
+        }
+
+        const executed = [];
+        for (const command of commands) {
+            await this.runServiceCommand(command, action);
+            executed.push(command);
+        }
+
+        const verb = action === 'stop' ? 'Stopped' : 'Started';
+        return {
+            message: `${verb} ${executed.length} service(s)`,
+            details: { commandsExecuted: executed }
+        };
+    }
+
+    async runServiceCommand(command, action) {
+        logger.info('Executing service command', { action, command });
+        try {
+            const { stdout, stderr } = await execAsync(command, { windowsHide: true });
+            if (stdout?.trim()) {
+                logger.debug('Service command output', { command, output: stdout.trim() });
+            }
+            if (stderr?.trim()) {
+                logger.debug('Service command warnings', { command, output: stderr.trim() });
+            }
+        } catch (error) {
+            const output = [error.stderr, error.stdout, error.message]
+                .filter(Boolean)
+                .map(value => value.toString().trim())
+                .filter(Boolean)
+                .join(' | ');
+            const nonFatal = this.getNonFatalServiceError(action, output);
+            if (nonFatal) {
+                logger.warn('Service command reported non-fatal condition', {
+                    action,
+                    command,
+                    reason: nonFatal,
+                    output
+                });
+                return;
+            }
+            throw new Error(`${action === 'stop' ? 'Stop' : 'Start'} command failed (${command}): ${output || 'Unknown error'}`);
+        }
+    }
+
+    getNonFatalServiceError(action, output = '') {
+        if (!output) {
+            return null;
+        }
+
+        const normalized = output.toLowerCase();
+        if (action === 'start') {
+            const phrases = [
+                'has already been started',
+                'already been started',
+                'service is already running'
+            ];
+            if (phrases.some(phrase => normalized.includes(phrase))) {
+                return 'already running';
+            }
+        } else if (action === 'stop') {
+            const phrases = [
+                'has not been started',
+                'has already been stopped',
+                'is not started',
+                'is not running',
+                'was not started'
+            ];
+            if (phrases.some(phrase => normalized.includes(phrase))) {
+                return 'already stopped';
+            }
+        }
+
+        return null;
+    }
+
+    async runServiceStartStep(steps, { throwOnFailure = false } = {}) {
+        if (this.serviceStartStepRecorded) {
+            return null;
+        }
+
+        let result;
+        if (!this.enableServiceControl) {
+            result = this.createSkippedStep('Start Services', 'ENABLE_SERVICE_CONTROL=false');
+        } else {
+            result = await this.executeStep('Start Services', () => this.manageServices('start'));
+        }
+
+        this.serviceStartStepRecorded = true;
+        steps.push(result);
+
+        if (this.enableServiceControl && !result.success && throwOnFailure) {
+            throw new Error(result.message || 'Failed to start services');
+        }
+
+        return result;
+    }
+
     formatStepSummaries(steps = []) {
         return (steps || []).map(step => ({
             name: step.name,
@@ -372,6 +538,3 @@ if (require.main === module) {
 }
 
 module.exports = DeploymentPipeline;
-
-
-
