@@ -5,6 +5,7 @@ logs/
 deployment-reports/
 .claude/
 config/environments.local*.json
+dist/
 *.log
 *.tmp
 *.bak

@@ -96,6 +96,16 @@ cp .env.example .env
 npm run dev
 ```
 
+### Build Standalone Executable (Windows)
+```bash
+# Install deps once
+npm install
+
+# Produce dist/d365-auto-deployment.exe (includes JS + config assets)
+npm run build:exe
+```
+Copy the resulting `dist/d365-auto-deployment.exe`, your `.env`, and the `config/` directory to any Windows server (with PowerShell + D365 prerequisites) and run the EXE directly—no Node.js installation required on that target machine.
+
 ## 📁 Project Structure
 
 ```
