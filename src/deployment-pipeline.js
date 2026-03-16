@@ -29,6 +29,7 @@ class DeploymentPipeline {
         this.enableBuildStep = this.getEnvFlag('ENABLE_BUILD_STEP', true);
         this.enableSyncStep = this.getEnvFlag('ENABLE_SYNC_STEP', true);
         this.enableReportsStep = this.getEnvFlag('ENABLE_REPORTS_STEP', true);
+        this.skipTfvcMergeOperations = this.getEnvFlag('SKIP_TFVC_MERGE_OPERATIONS', false);
         this.enableServiceControl = this.getEnvFlag('ENABLE_SERVICE_CONTROL', true);
 
         this.serviceStopCommands = this.getServiceCommands('SERVICE_STOP_COMMANDS', [
@@ -43,7 +44,8 @@ class DeploymentPipeline {
             'net start SQLServerReportingServices',
             'net start DynamicsAxBatch',
             'net start Microsoft.Dynamics.AX.Framework.Tools.DMF.SSISHelperService.exe',
-            'net start MR2012ProcessService'
+            'net start MR2012ProcessService',
+            'iisreset /start'
         ]);
         this.serviceCommandTimeout = this.getNumericEnv('SERVICE_COMMAND_TIMEOUT_MS', 5 * 60 * 1000);
 
@@ -70,7 +72,38 @@ class DeploymentPipeline {
             });
 
             steps.push(await this.executeServiceStopStep());
-            steps.push(await this.executeConfiguredStep('TFVC / Branch Operation', this.enableTfvcStep, () => this.tfvc.execute(), 'ENABLE_TFVC_STEP=false'));
+
+            // TFVC merge with hasChanges detection
+            if (this.enableTfvcStep) {
+                const mergeResult = await this.executeStep('TFVC / Branch Operation', () => this.tfvc.execute());
+                steps.push(mergeResult);
+                if (!mergeResult.success) {
+                    throw new Error(mergeResult.message);
+                }
+
+                const hasChanges = Boolean(mergeResult.details?.hasChanges);
+                if (!hasChanges && !this.skipTfvcMergeOperations) {
+                    logger.info('No changes detected after merge, stopping pipeline');
+                    steps.push(await this.executeServiceStartStep(true));
+
+                    const results = this.buildResults(steps);
+                    results.hasChanges = false;
+                    results.message = 'Pipeline completed - no changes to merge';
+
+                    await this.notifications.sendNotification('success', {
+                        deploymentId: this.deploymentId,
+                        model: this.modelName,
+                        sourceBranch: this.sourceBranch,
+                        targetBranch: this.targetBranch,
+                        executionTime: results.totalDuration
+                    });
+
+                    return results;
+                }
+            } else {
+                steps.push(this.createSkippedStep('TFVC / Branch Operation', 'ENABLE_TFVC_STEP=false'));
+            }
+
             steps.push(await this.executeConfiguredStep('Full Build', this.enableBuildStep, () => this.build.execute(), 'ENABLE_BUILD_STEP=false'));
             steps.push(await this.executeConfiguredStep('Database Synchronization', this.enableSyncStep, () => this.sync.execute(), 'ENABLE_SYNC_STEP=false'));
             steps.push(await this.executeConfiguredStep('Deploy All Reports', this.enableReportsStep, () => this.reports.execute(), 'ENABLE_REPORTS_STEP=false'));
@@ -247,6 +280,15 @@ class DeploymentPipeline {
 
     async manageServices(action) {
         const commands = action === 'stop' ? this.serviceStopCommands : this.serviceStartCommands;
+        if (!commands.length) {
+            const message = `No services configured to ${action}`;
+            logger.info(message, { action });
+            return {
+                message,
+                details: { commandsExecuted: [] }
+            };
+        }
+
         const executed = [];
 
         for (const originalCommand of commands) {
@@ -261,6 +303,12 @@ class DeploymentPipeline {
                 if (stdout?.trim()) logger.debug('Service command stdout', { command, output: stdout.trim() });
                 if (stderr?.trim()) logger.debug('Service command stderr', { command, output: stderr.trim() });
             } catch (error) {
+                const timedOut = (error.killed && error.signal === 'SIGTERM')
+                    || /timed out/i.test(error.message || '');
+                if (timedOut) {
+                    throw new Error(`${action === 'stop' ? 'Stop' : 'Start'} command timed out (${command}) after ${this.serviceCommandTimeout}ms`);
+                }
+
                 const output = [error.stderr, error.stdout, error.message]
                     .filter(Boolean)
                     .map(value => value.toString().trim())
@@ -300,6 +348,10 @@ class DeploymentPipeline {
     }
 
     getNonFatalServiceError(action, output = '') {
+        if (!output) {
+            return null;
+        }
+
         const normalized = output.toLowerCase();
 
         if (action === 'stop') {

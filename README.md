@@ -85,6 +85,7 @@ TFVC_PASSWORD=your-tfvc-password
 TFVC_PAT=optional-personal-access-token           # Preferred over password
 AZURE_PAT=optional-azure-devops-pat
 TFVC_CREDENTIAL_MODE=auto                         # auto (PAT first), pat, or password
+TFVC_ALLOW_INTEGRATED_AUTH_FALLBACK=false
 ```
 
 **D365:**
@@ -110,7 +111,8 @@ SKIP_TFVC_MERGE_OPERATIONS=false                  # true = skip merge, only get 
 ```env
 ENABLE_SERVICE_CONTROL=true
 SERVICE_STOP_COMMANDS=net stop W3SVC,net stop SQLServerReportingServices,net stop DynamicsAxBatch,net stop Microsoft.Dynamics.AX.Framework.Tools.DMF.SSISHelperService.exe,net stop MR2012ProcessService
-SERVICE_START_COMMANDS=net start W3SVC,net start SQLServerReportingServices,net start DynamicsAxBatch,net start Microsoft.Dynamics.AX.Framework.Tools.DMF.SSISHelperService.exe,net start MR2012ProcessService
+SERVICE_START_COMMANDS=net start W3SVC,net start SQLServerReportingServices,net start DynamicsAxBatch,net start Microsoft.Dynamics.AX.Framework.Tools.DMF.SSISHelperService.exe,net start MR2012ProcessService,iisreset /start
+SERVICE_COMMAND_TIMEOUT_MS=300000
 ```
 
 **Notifications:**
@@ -138,6 +140,9 @@ MAX_LOG_FILES=5
 ```
 
 > **Note:** `TFVC_CREDENTIAL_MODE=auto` prefers `TFVC_PAT`/`AZURE_PAT` before `TFVC_PASSWORD`. The TFVC workspace defined by `TFVC_WORKSPACE` must already exist locally with both `$/{project}/{SOURCE_BRANCH}` and `$/{project}/{TARGET_BRANCH}` mapped.
+
+Set `SKIP_TFVC_MERGE_OPERATIONS=true` for environments where you want to bypass the descriptor update + TFVC merge step while still running build, sync, and report deployment.
+Service control is enabled by default; only set `ENABLE_SERVICE_CONTROL=false` if you explicitly do **not** want the pipeline to call `SERVICE_STOP_COMMANDS` before TFVC operations (to avoid locked DLLs) and `SERVICE_START_COMMANDS` after the pipeline finishes (even if it fails). Both command lists accept comma/semicolon/pipe separated values and default to the IIS, SSRS, batch, DMF helper, and MR services shown above. The runner automatically adds `/y` to any `net stop ...` commands so dependency prompts do not hang unattended, and every service command inherits the `SERVICE_COMMAND_TIMEOUT_MS` (default 5 minutes) safeguard.
 
 ### Environment Paths
 
@@ -187,7 +192,7 @@ The pipeline executes these steps in sequence:
 5. **Build** - Compile the D365 model using `xppc.exe` *(if enabled)*
 6. **Database Sync** - Run `SyncEngine.exe` with `syncmode=fullall` against AxDB *(if enabled)*
 7. **Deploy Reports** - Execute `DeployAllReportsToSSRS.ps1` *(if enabled)*
-8. **Start Services** - Run `SERVICE_START_COMMANDS`
+8. **Start Services** - Run `SERVICE_START_COMMANDS` (always attempted, even on failure)
 9. **Completion Notification** - Post success or failure to Teams with execution time and error details
 
 Each step can be independently enabled/disabled via `ENABLE_*_STEP` environment variables. On failure, the pipeline attempts to restart services before sending the failure notification.
