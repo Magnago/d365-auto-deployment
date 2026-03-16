@@ -1,66 +1,57 @@
-﻿require('dotenv').config();
-const os = require('os');
-const { spawn } = require('child_process');
+require('dotenv').config();
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
+const { spawn } = require('child_process');
 const logger = require('../core/logger');
 const NotificationService = require('../core/notification-service');
 
 class TFVCMerge {
     constructor() {
         this.modelName = process.env.D365_MODEL || 'YourD365Model';
+        this.projectName = process.env.TFVC_PROJECT_NAME || 'YourTFVCProject';
         this.sourceBranch = process.env.SOURCE_BRANCH || 'Auto-Deployment-Dev';
         this.targetBranch = process.env.TARGET_BRANCH || 'Auto-Deployment-Test';
-        this.projectName = process.env.TFVC_PROJECT_NAME || 'Your TFVC Project';
-        this.collectionHost = null;
-        this.isAzureDevOpsHost = false;
+        this.workspaceName = (process.env.TFVC_WORKSPACE || '').trim();
+        this.workspaceOwner = (process.env.TFVC_WORKSPACE_OWNER || '').trim() || null;
         this.collectionUrl = this.normalizeCollectionUrl(process.env.TFVC_COLLECTION_URL);
+        this.rawUsername = process.env.TFVC_USERNAME || process.env.TFVC_LOGIN || '';
+        this.credentialMode = (process.env.TFVC_CREDENTIAL_MODE || 'auto').trim().toLowerCase();
+        const credential = this.resolveCredential(this.credentialMode);
+        this.authSecret = credential.value;
+        this.authSource = credential.source;
+        this.skipMergeOperations = this.getBooleanEnv(process.env.SKIP_TFVC_MERGE_OPERATIONS, false);
 
-        this.rawUsername = process.env.TFVC_USERNAME || process.env.TFVC_LOGIN || 'buildsvc';
-        this.username = this.rawUsername;
-        this.password = process.env.TFVC_PAT || process.env.TFVC_PASSWORD || process.env.AZURE_PAT;
-        const workspaceName = process.env.TFVC_WORKSPACE;
-        this.workspaceName = workspaceName ? workspaceName.trim() : workspaceName;
-        const workspaceOwner = process.env.TFVC_WORKSPACE_OWNER;
-        this.workspaceOwner = workspaceOwner ? workspaceOwner.trim() : null;
-        this.useCachedAuthOnly = process.env.TFVC_USE_CACHED_AUTH_ONLY === 'true';
-        this.forceLoginCommands = new Set(['checkin']);
-
-        this.allowIntegratedAuthFallback = process.env.TFVC_ALLOW_INTEGRATED_AUTH_FALLBACK !== 'false';
-        this.usernameVariants = this.buildUsernameVariants();
-        this.username = this.usernameVariants[0];
-
-        this.projectServerPath = `$/${this.projectName}`;
-        this.sourceBranchPath = `${this.projectServerPath}/${this.sourceBranch}`;
-        this.targetBranchPath = `${this.projectServerPath}/${this.targetBranch}`;
+        this.sourceBranchPath = `$/${this.projectName}/${this.sourceBranch}`;
+        this.targetBranchPath = `$/${this.projectName}/${this.targetBranch}`;
+        this.workspaceMappings = [];
         this.sourceLocalPath = null;
         this.targetLocalPath = null;
         this.lastVersionLabel = null;
-        this.skipMergeOperations = this.getBooleanEnv(process.env.SKIP_TFVC_MERGE_OPERATIONS, false);
 
-        this.notificationService = new NotificationService();
-        this.deploymentId = 'TFVC-' + new Date().toISOString().replace(/[:.]/g, '-');
-        this.tfExePath = this.findTfExecutable();
+        this.notifications = new NotificationService();
+        this.executionId = `TFVC-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+
+        this.tfvcOpsScript = path.join(__dirname, 'tfvc-operations.ps1');
     }
 
     async execute() {
         this.validateConfiguration();
-
-        const startTime = Date.now();
-        this.lastVersionLabel = null;
+        const startedAt = Date.now();
 
         try {
-            logger.info('dYs? Starting TFVC merge using pre-configured workspace', {
+            logger.info('Starting TFVC branch operation', {
                 workspace: this.workspaceName,
                 sourceBranch: this.sourceBranchPath,
-                targetBranch: this.targetBranchPath
+                targetBranch: this.targetBranchPath,
+                credentialMode: this.credentialMode,
+                credentialSource: this.authSource,
+                authMethod: 'dotnet-BasicAuthCredential'
             });
 
-        if (this.shouldNotify()) {
-            await this.notificationService.sendNotification('start', {
-                deploymentId: this.deploymentId,
-                stepName: 'TFVC Merge',
-                environmentType: 'TFVC Merge',
+            if (this.shouldNotify()) {
+                await this.notifications.sendNotification('start', {
+                    deploymentId: this.executionId,
                     model: this.modelName,
                     sourceBranch: this.sourceBranch,
                     targetBranch: this.targetBranch
@@ -69,63 +60,37 @@ class TFVCMerge {
 
             await this.validateWorkspaceContext();
 
-            await this.getLatestBranch(this.sourceBranchPath, 'source');
-            await this.getLatestBranch(this.targetBranchPath, 'target');
-
-            let mergeResult;
-            if (this.skipMergeOperations) {
-                logger.info('Skipping TFVC merge and descriptor update due to SKIP_TFVC_MERGE_OPERATIONS flag', {
-                    workspace: this.workspaceName
-                });
-
-                mergeResult = {
-                    success: true,
-                    message: 'TFVC merge skipped via SKIP_TFVC_MERGE_OPERATIONS',
-                    details: {
-                        skipped: true,
-                        reason: 'SKIP_TFVC_MERGE_OPERATIONS=true',
-                        hasChanges: true,
-                        sourceRefreshed: true,
-                        targetRefreshed: true
-                    }
-                };
-            } else {
-                await this.handleVersionBumpIfNeeded();
-                mergeResult = await this.performMerge();
-            }
+            const details = this.skipMergeOperations
+                ? await this.refreshTargetOnly()
+                : await this.executeMergeWorkflow();
 
             if (this.shouldNotify()) {
-                await this.notificationService.sendNotification('success', {
-                    deploymentId: this.deploymentId,
-                    stepName: 'TFVC Merge',
-                    environmentType: 'TFVC Merge',
+                await this.notifications.sendNotification('success', {
+                    deploymentId: this.executionId,
                     model: this.modelName,
                     sourceBranch: this.sourceBranch,
                     targetBranch: this.targetBranch,
-                    executionTime: Date.now() - startTime,
-                    mergeResult
+                    executionTime: Date.now() - startedAt
                 });
             }
 
             return {
                 success: true,
-                message: mergeResult.message,
-                details: mergeResult
+                message: details.message,
+                details
             };
         } catch (error) {
-            logger.error('TFVC Merge failed', { error: error.message });
+            logger.error('TFVC branch operation failed', { error: error.message });
 
             if (this.shouldNotify()) {
-                await this.notificationService.sendNotification('failure', {
-                    deploymentId: this.deploymentId,
-                    stepName: 'TFVC Merge',
-                    environmentType: 'TFVC Merge',
+                await this.notifications.sendNotification('failure', {
+                    deploymentId: this.executionId,
                     model: this.modelName,
                     sourceBranch: this.sourceBranch,
                     targetBranch: this.targetBranch,
-                    executionTime: Date.now() - startTime,
-                    failedStep: 'TFVC Merge',
-                    error: error.message
+                    failedStep: 'TFVC / Branch Operation',
+                    error: error.message,
+                    executionTime: Date.now() - startedAt
                 });
             }
 
@@ -133,706 +98,240 @@ class TFVCMerge {
         }
     }
 
-    async validateWorkspaceContext() {
-        logger.info('Validating TF workspace configuration');
+    /**
+     * Execute a TFVC operation via the .NET client library PowerShell script.
+     * Uses BasicAuthCredential + TfsClientCredentials which properly sends HTTP Basic auth,
+     * bypassing TF.exe's broken VssBasicCredential/ADAL flow.
+     */
+    async executeTfvcOperation(operation, args = {}) {
+        const jsonArgs = JSON.stringify(args);
+        logger.info(`Executing TFVC operation: ${operation}`, { args });
 
-        const workspaceList = await this.executeTfCommand([
-            'workspaces',
-            `/collection:${this.collectionUrl}`,
-            '/format:brief',
-            `/computer:${os.hostname()}`,
-            '/owner:*',
-            '/noprompt'
-        ], { allowEmpty: true });
-
-        const workspaceInfo = this.findWorkspaceInfo(workspaceList.stdout);
-        if (!workspaceInfo && !workspaceList.stdout.toLowerCase().includes(this.workspaceName.toLowerCase())) {
-            throw new Error(`Workspace "${this.workspaceName}" not found on this machine. Please create or switch to the correct TFVC workspace before rerunning the deployment script.`);
-        }
-
-        if (!this.workspaceOwner && workspaceInfo && workspaceInfo.owner) {
-            this.workspaceOwner = workspaceInfo.owner;
-            logger.info('Detected TFVC workspace owner from local configuration', {
-                workspace: this.workspaceName,
-                owner: this.workspaceOwner
-            });
-        } else if (this.workspaceOwner && workspaceInfo && workspaceInfo.owner) {
-            const configured = this.workspaceOwner.trim().toLowerCase();
-            const detected = workspaceInfo.owner.trim().toLowerCase();
-            if (configured !== detected) {
-                logger.warn('TFVC workspace owner configured via TFVC_WORKSPACE_OWNER differs from detected owner', {
-                    workspace: this.workspaceName,
-                    configuredOwner: this.workspaceOwner,
-                    detectedOwner: workspaceInfo.owner
-                });
-            }
-        }
-
-        const mappings = await this.executeTfCommand([
-            'workfold',
-            `/workspace:${this.buildWorkspaceSpecifier()}`,
-            `/collection:${this.collectionUrl}`
-        ], { allowEmpty: true });
-
-        this.sourceLocalPath = this.extractLocalPath(mappings.stdout, this.sourceBranchPath);
-        this.targetLocalPath = this.extractLocalPath(mappings.stdout, this.targetBranchPath);
-
-        const missing = [];
-        if (!this.sourceLocalPath) missing.push(this.sourceBranchPath);
-        if (!this.targetLocalPath) missing.push(this.targetBranchPath);
-
-        if (missing.length) {
-            throw new Error(`Required TFVC mappings missing from workspace "${this.workspaceName}": ${missing.join(', ')}. Map these branches before running the script.`);
-        }
-
-        await this.verifyBranchAccess(this.sourceLocalPath, 'source');
-        await this.verifyBranchAccess(this.targetLocalPath, 'target');
-    }
-
-    extractLocalPath(workfoldOutput, serverPath) {
-        const lines = (workfoldOutput || '').split(/\r?\n/);
-        const normalizedServer = serverPath.toLowerCase();
-
-        for (const rawLine of lines) {
-            const line = rawLine.trim();
-            if (!line || line.startsWith('Workspace') || line.startsWith('There are')) {
-                continue;
-            }
-
-            const parts = line.split(':');
-            if (parts.length < 2) {
-                continue;
-            }
-
-            const server = parts[0].trim().toLowerCase();
-            if (server !== normalizedServer) {
-                continue;
-            }
-
-            let localPath = parts.slice(1).join(':').trim();
-            localPath = localPath.replace(/\s+\[.*]$/, '').trim();
-            return localPath;
-        }
-
-        return null;
-    }
-
-    async verifyBranchAccess(localPath, label) {
-        const result = await this.executeTfCommand([
-            'dir',
-            '.'
-        ], { cwd: localPath });
-
-        if (!result.success) {
-            throw new Error(`TFVC ${label} branch mapping (${localPath}) is not accessible. Error: ${result.stderr || result.stdout}`);
-        }
-    }
-
-    async getLatestBranch(serverPath, label) {
-        logger.info(`Getting latest for ${label} branch`, { branch: serverPath });
-
-        const useServerPath = typeof serverPath === 'string' && serverPath.startsWith('$/');
-        const pathArgument = useServerPath ? serverPath : '.';
-        const options = useServerPath
-            ? {}
-            : {
-                cwd: label === 'source' ? this.sourceLocalPath : this.targetLocalPath
-            };
-
-        await this.executeTfCommand([
-            'get',
-            pathArgument,
-            '/recursive',
-            '/overwrite',
-            '/force',
-            '/noprompt'
-        ], options);
-    }
-
-    async performMerge() {
-        logger.info('Executing TF merge');
-
-        await this.executeTfCommand([
-            'merge',
-            this.sourceBranchPath,
-            this.targetBranchPath,
-            '/recursive',
-            '/noprompt'
-        ], { cwd: this.targetLocalPath });
-
-        let statusResult = await this.getPendingChanges();
-
-        if (this.isNoPendingChangesMessage(statusResult.stdout || statusResult.stderr)) {
-            logger.info('No pending changes after merge - branches already in sync');
-            return {
-                status: 'noChanges',
-                message: 'TFVC merge completed - no changes required',
-                pendingChanges: 0,
-                changeset: null,
-                hasChanges: false
-            };
-        }
-
-        if (this.hasConflicts(statusResult.stdout || statusResult.stderr)) {
-            throw new Error('Merge conflicts detected. Resolve the conflicts in Visual Studio and rerun the deployment.');
-        }
-
-        const changesetId = await this.checkInChanges();
-
-        if (!changesetId) {
-            logger.info('No changes were checked in because no pending changes remained');
-            return {
-                status: 'noChanges',
-                message: 'TFVC merge completed - No pending changes detected at check-in',
-                pendingChanges: 0,
-                changeset: null,
-                hasChanges: false
-            };
-        }
-
-        return {
-            status: 'merged',
-            message: `TFVC merge completed successfully (changeset ${changesetId})`,
-            pendingChanges: this.extractPendingChangeCount(statusResult.stdout),
-            changeset: changesetId,
-            hasChanges: true
-        };
-    }
-
-    async getPendingChanges() {
-        return this.executeTfCommand([
-            'status',
-            '/recursive',
-            '/noprompt'
-        ], { allowEmpty: true, cwd: this.targetLocalPath });
-    }
-
-    async checkInChanges() {
-        const baseComment = this.lastVersionLabel
-            ? `${this.modelName} ${this.lastVersionLabel}`
-            : this.buildMergeComment();
-        const comment = baseComment.replace(/"/g, '\'');
-
-        try {
-            const result = await this.executeTfCommand([
-                'checkin',
-                `/comment:${comment}`,
-                '/recursive',
-                '/noprompt'
-            ], { cwd: this.targetLocalPath });
-
-            const changesetMatch = (result.stdout || '').match(/Changeset\s*#?(\d+)/i);
-            const changesetId = changesetMatch ? changesetMatch[1] : 'Unknown';
-            logger.info('Check-in completed', { changesetId });
-
-            this.lastVersionLabel = null;
-            return changesetId;
-        } catch (error) {
-            if (this.isNoPendingChangesMessage(error.message)) {
-                logger.info('Check-in skipped: there are no pending changes to commit');
-                return null;
-            }
-            throw error;
-        }
-    }
-
-    async executeTfCommand(args, options = {}) {
-        if (!this.tfExePath) {
-            throw new Error('TF.exe not found. Install Visual Studio with Team Explorer.');
-        }
-
-        const baseArgs = this.ensureCollectionArgument(args);
-        const commandName = (baseArgs[0] || '').toString().toLowerCase();
-        const shouldUseLogin = this.shouldUseLogin(options, commandName);
-        const allowFallback = options.disableAuthFallback === true
-            ? false
-            : this.allowIntegratedAuthFallback;
-
-        let lastAuthError = null;
-
-        if (shouldUseLogin) {
-            for (const usernameVariant of this.usernameVariants) {
-                try {
-                    const finalArgs = this.withLoginArguments(baseArgs, usernameVariant);
-                    return await this.spawnTfProcess(this.tfExePath, finalArgs, {
-                        ...options,
-                        useLogin: true
-                    });
-                } catch (error) {
-                    if (!this.isAuthenticationError(error.message)) {
-                        throw error;
-                    }
-
-                    lastAuthError = error;
-                    logger.warn('TF authentication failed with credential variant', {
-                        username: usernameVariant,
-                        error: error.message
-                    });
-                }
-            }
-        } else {
-            return this.spawnTfProcess(this.tfExePath, baseArgs, {
-                ...options,
-                useLogin: false
-            });
-        }
-
-        if (allowFallback) {
-            logger.warn('TF authentication failed with configured credentials. Retrying with integrated auth.');
-            return this.spawnTfProcess(this.tfExePath, this.withoutNoPrompt(baseArgs), {
-                ...options,
-                useLogin: false
-            });
-        }
-
-        if (lastAuthError) {
-            throw lastAuthError;
-        }
-
-        throw new Error('TF authentication failed.');
-    }
-
-    withoutNoPrompt(args = []) {
-        return args.filter(arg => {
-            if (typeof arg !== 'string') {
-                return true;
-            }
-            return arg.toLowerCase() !== '/noprompt';
-        });
-    }
-
-    ensureCollectionArgument(args = []) {
-        if (!this.collectionUrl || !args.length) {
-            return [...args];
-        }
-
-        const command = (args[0] || '').toString().toLowerCase();
-        const commandsRequiringCollection = new Set(['dir']);
-
-        if (!commandsRequiringCollection.has(command)) {
-            return [...args];
-        }
-
-        const hasCollection = args.some(arg =>
-            typeof arg === 'string' && arg.toLowerCase().startsWith('/collection:')
-        );
-
-        if (hasCollection) {
-            return [...args];
-        }
-
-        return [
-            ...args,
-            `/collection:${this.collectionUrl}`
-        ];
-    }
-
-    buildWorkspaceSpecifier() {
-        if (this.workspaceOwner) {
-            return `${this.workspaceName};${this.workspaceOwner}`;
-        }
-        return this.workspaceName;
-    }
-
-    findWorkspaceInfo(output = '') {
-        if (!output || !this.workspaceName) {
-            return null;
-        }
-
-        const target = this.workspaceName.trim().toLowerCase();
-        const lines = output.split(/\r?\n/);
-
-        for (const rawLine of lines) {
-            const line = rawLine.trim();
-            if (!line ||
-                /^collection:/i.test(line) ||
-                /^workspace/i.test(line) ||
-                /^owner/i.test(line) ||
-                /^-+$/.test(line)) {
-                continue;
-            }
-
-            const columns = line
-                .split(/\s{2,}|\t+/)
-                .map(col => col.trim())
-                .filter(Boolean);
-
-            if (!columns.length) {
-                continue;
-            }
-
-            const workspace = columns[0].toLowerCase();
-            if (workspace !== target) {
-                continue;
-            }
-
-            return {
-                name: columns[0],
-                owner: columns[1] ? columns[1].trim() : null,
-                computer: columns[2] || null,
-                rawLine
-            };
-        }
-
-        return null;
-    }
-
-    buildUsernameVariants() {
-        const variants = [];
-        const seen = new Set();
-        const addVariant = (value) => {
-            if (!value) {
-                return;
-            }
-            const normalized = value.trim();
-            if (!normalized) {
-                return;
-            }
-            const key = normalized.toLowerCase();
-            if (seen.has(key)) {
-                return;
-            }
-            seen.add(key);
-            variants.push(normalized);
-        };
-
-        const candidateBases = [];
-        const baseUsername = (this.rawUsername || 'buildsvc').trim();
-        const strippedUsername = this.stripAzureDevOpsPrefix(baseUsername);
-
-        const pushCandidate = (value) => {
-            if (value) {
-                candidateBases.push(value);
-                if (value.includes('@')) {
-                    const alias = value.split('@')[0];
-                    if (alias) {
-                        candidateBases.push(alias);
-                    }
-                }
-            }
-        };
-
-        pushCandidate(baseUsername);
-        if (strippedUsername && strippedUsername !== baseUsername) {
-            pushCandidate(strippedUsername);
-        }
-
-        for (const candidate of candidateBases) {
-            addVariant(candidate);
-            if (this.isAzureDevOpsHost) {
-                addVariant(`AzureDevOpsServices\\${candidate}`);
-                addVariant(`AzureDevOps\\${candidate}`);
-            }
-        }
-
-        addVariant('buildsvc');
-
-        return variants;
-    }
-
-    stripAzureDevOpsPrefix(value = '') {
-        return value.replace(/^(azuredevopsservices|azuredevops)\\+/i, '');
-    }
-
-    spawnTfProcess(tfPath, args, options = {}) {
         return new Promise((resolve, reject) => {
-            const maskedArgs = this.maskSensitiveArgs(args);
-            logger.info(`Executing TF command: tf ${maskedArgs.join(' ')}`);
+            const psArgs = [
+                '-NoProfile',
+                '-ExecutionPolicy', 'Bypass',
+                '-File', this.tfvcOpsScript,
+                '-Operation', operation,
+                '-JsonArgs', jsonArgs,
+                '-CollectionUrl', this.collectionUrl,
+                '-Pat', this.authSecret,
+                '-WorkspaceName', this.workspaceName
+            ];
 
-            const childEnv = { ...process.env };
-            if (this.useCachedAuthOnly && options.useLogin !== true) {
-                delete childEnv.VS_ENTITLEMENT_TOKEN;
-            } else if (this.password) {
-                childEnv.VS_ENTITLEMENT_TOKEN = this.password || process.env.VS_ENTITLEMENT_TOKEN;
+            if (this.workspaceOwner) {
+                psArgs.push('-WorkspaceOwner', this.workspaceOwner);
             }
 
-            const child = spawn(tfPath, args, {
-                cwd: options.cwd || process.cwd(),
-                env: childEnv
+            const child = spawn('powershell.exe', psArgs, {
+                cwd: process.cwd(),
+                shell: false,
+                windowsHide: true,
+                stdio: ['ignore', 'pipe', 'pipe']
             });
 
             let stdout = '';
             let stderr = '';
 
-            child.stdout.on('data', (data) => {
-                stdout += data.toString();
+            child.stdout.on('data', (chunk) => {
+                stdout += chunk.toString();
             });
 
-            child.stderr.on('data', (data) => {
-                stderr += data.toString();
-            });
-
-            child.on('close', (code) => {
-                if (code === 0) {
-                    resolve({ success: true, stdout: stdout.trim(), stderr: stderr.trim(), code });
-                    return;
-                }
-
-                const errorOutput = `${stderr || ''}${stdout || ''}`.trim();
-
-                if (this.isAuthenticationError(errorOutput)) {
-                    logger.error('TF command failed with authentication error', {
-                        command: maskedArgs.join(' '),
-                        error: errorOutput
-                    });
-                    reject(new Error(`TF authentication failed: ${errorOutput}`));
-                    return;
-                }
-
-                logger.error('TF command failed', {
-                    command: maskedArgs.join(' '),
-                    error: errorOutput || `exit code ${code}`
-                });
-
-                reject(new Error(errorOutput || `TF command failed with exit code ${code}`));
+            child.stderr.on('data', (chunk) => {
+                stderr += chunk.toString();
             });
 
             child.on('error', (error) => {
-                reject(new Error(`TF command execution error: ${error.message}`));
+                reject(new Error(`PowerShell TFVC operation error: ${error.message}`));
+            });
+
+            child.on('close', (code) => {
+                const output = stdout.trim();
+
+                if (output) {
+                    try {
+                        const result = JSON.parse(output);
+                        if (result.success) {
+                            logger.info(`TFVC operation ${operation} succeeded`, result);
+                            resolve(result);
+                        } else {
+                            reject(new Error(result.error || `TFVC operation ${operation} failed`));
+                        }
+                        return;
+                    } catch (_) {
+                        // Not JSON — fall through
+                    }
+                }
+
+                if (code === 0) {
+                    resolve({ success: true, stdout: output, stderr: stderr.trim() });
+                } else {
+                    const errorMsg = stderr.trim() || output || `TFVC operation ${operation} failed with exit code ${code}`;
+                    reject(new Error(errorMsg));
+                }
             });
         });
     }
 
-    shouldUseLogin(options = {}, commandName = '') {
-        if (this.forceLoginCommands.has(commandName)) {
-            return true;
+    async validateWorkspaceContext() {
+        const result = await this.executeTfvcOperation('workspaces');
+
+        this.workspaceMappings = (result.folders || []).map(f => ({
+            serverPath: f.serverItem,
+            localPath: f.localItem
+        }));
+
+        this.sourceLocalPath = this.getExactMappedPath(this.sourceBranchPath);
+        this.targetLocalPath = this.getExactMappedPath(this.targetBranchPath);
+
+        if (!this.sourceLocalPath || !this.targetLocalPath) {
+            throw new Error('Source or target branch is not mapped in the configured TFVC workspace.');
         }
 
-        if (this.useCachedAuthOnly || options.forceIntegratedAuth) {
-            return false;
-        }
+        await this.ensureLocalPath(this.sourceLocalPath);
+        await this.ensureLocalPath(this.targetLocalPath);
 
-        if (options.forceLogin) {
-            return true;
-        }
-
-        return Boolean(this.username && this.password);
+        logger.info('Workspace validated', {
+            workspace: result.name,
+            owner: result.owner,
+            sourceLocalPath: this.sourceLocalPath,
+            targetLocalPath: this.targetLocalPath,
+            mappings: this.workspaceMappings.length
+        });
     }
 
-    withLoginArguments(args, usernameVariant) {
-        if (!usernameVariant || !this.password) {
-            return [...args];
+    async refreshTargetOnly() {
+        await this.getLatestBranch(this.targetBranchPath, 'target');
+        return {
+            skipped: true,
+            targetRefreshed: true,
+            message: 'TFVC merge skipped; target branch refreshed'
+        };
+    }
+
+    async executeMergeWorkflow() {
+        await this.getLatestBranch(this.sourceBranchPath, 'source');
+        await this.mergeSourceIntoTarget();
+
+        const conflicts = await this.queryConflicts();
+        if (conflicts.count > 0) {
+            throw new Error('Merge conflicts detected. Resolve them in Visual Studio and rerun the deployment.');
         }
 
-        const filteredArgs = args.filter(arg =>
-            !(typeof arg === 'string' && arg.toLowerCase().startsWith('/login:'))
+        await this.bumpDescriptorVersion();
+        const changeset = await this.checkInChanges();
+        await this.getLatestBranch(this.targetBranchPath, 'target');
+
+        return {
+            skipped: false,
+            changeset,
+            targetRefreshed: true,
+            message: `Source branch merged into target branch${changeset ? ` (changeset ${changeset})` : ''}`
+        };
+    }
+
+    async getLatestBranch(branchPath, label) {
+        logger.info(`Getting latest for ${label} branch`, { branch: branchPath });
+
+        const mappings = this.getMappedPathsForBranch(branchPath);
+        if (mappings.length === 0) {
+            throw new Error(`No TFVC mappings found for branch ${branchPath}`);
+        }
+
+        for (const mapping of mappings) {
+            await this.ensureLocalPath(mapping.localPath);
+            logger.info('Refreshing TFVC mapped path', {
+                branch: branchPath,
+                label,
+                mappedServerPath: mapping.serverPath,
+                localPath: mapping.localPath
+            });
+
+            await this.executeTfvcOperation('getlatest', {
+                branchPath: mapping.serverPath
+            });
+        }
+    }
+
+    async mergeSourceIntoTarget() {
+        logger.info('Merging source branch into target branch', {
+            sourceBranch: this.sourceBranchPath,
+            targetBranch: this.targetBranchPath
+        });
+
+        await this.executeTfvcOperation('merge', {
+            sourcePath: this.sourceBranchPath,
+            targetPath: this.targetBranchPath
+        });
+    }
+
+    async queryConflicts() {
+        return this.executeTfvcOperation('conflicts', {
+            path: this.targetBranchPath
+        });
+    }
+
+    async bumpDescriptorVersion() {
+        const descriptorPath = this.getDescriptorPath(this.targetLocalPath);
+        if (!descriptorPath) {
+            throw new Error(`Descriptor file not found for model ${this.modelName}`);
+        }
+
+        await this.executeTfvcOperation('edit', {
+            filePath: descriptorPath
+        });
+
+        const xml = fs.readFileSync(descriptorPath, 'utf8');
+        const version = this.parseDescriptorVersion(xml);
+        const nextRevision = version.revision + 1;
+        const updatedXml = xml.replace(
+            new RegExp(`(<VersionRevision>)(\\s*)${version.revision}(\\s*)(</VersionRevision>)`, 'i'),
+            `$1$2${nextRevision}$3$4`
         );
 
-        return [
-            ...filteredArgs,
-            `/login:${usernameVariant},${this.password}`
-        ];
-    }
-
-    maskSensitiveArgs(args) {
-        return args.map(arg => {
-            if (typeof arg !== 'string') {
-                return arg;
-            }
-            return arg.toLowerCase().startsWith('/login:')
-                ? '/login:***MASKED***'
-                : arg;
-        });
-    }
-
-    isAuthenticationError(message = '') {
-        const normalized = (message || '').toLowerCase();
-        return normalized.includes('tf30063')
-            || normalized.includes('not authorized')
-            || normalized.includes('unauthorized')
-            || normalized.includes('authentication')
-            || normalized.includes('access denied');
-    }
-
-    hasConflicts(output = '') {
-        const normalized = (output || '').toLowerCase();
-        return normalized.includes('conflict') || normalized.includes('resolve');
-    }
-
-    isNoPendingChangesMessage(message = '') {
-        return (message || '').toLowerCase().includes('no pending changes');
-    }
-
-    extractPendingChangeCount(output = '') {
-        if (!output) {
-            return 0;
-        }
-        return output
-            .split(/\r?\n/)
-            .filter(line => line.trim() && !/^(workspace|pending changes)/i.test(line))
-            .length;
-    }
-
-    findTfExecutable() {
-        const possiblePaths = [
-            'C:\\Program Files\\Microsoft Visual Studio\\2022\\Enterprise\\Common7\\IDE\\CommonExtensions\\Microsoft\\TeamFoundation\\Team Explorer\\TF.exe',
-            'C:\\Program Files\\Microsoft Visual Studio\\2022\\Professional\\Common7\\IDE\\CommonExtensions\\Microsoft\\TeamFoundation\\Team Explorer\\TF.exe',
-            'C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\Common7\\IDE\\CommonExtensions\\Microsoft\\TeamFoundation\\Team Explorer\\TF.exe',
-            'C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\Enterprise\\Common7\\IDE\\CommonExtensions\\Microsoft\\TeamFoundation\\Team Explorer\\TF.exe',
-            'C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\Professional\\Common7\\IDE\\CommonExtensions\\Microsoft\\TeamFoundation\\Team Explorer\\TF.exe',
-            'C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\Community\\Common7\\IDE\\CommonExtensions\\Microsoft\\TeamFoundation\\Team Explorer\\TF.exe'
-        ];
-
-        for (const candidate of possiblePaths) {
-            try {
-                if (fs.existsSync(candidate)) {
-                    return candidate;
-                }
-            } catch (error) {
-                continue;
-            }
-        }
-
-        return 'tf.exe';
-    }
-
-    buildMergeComment() {
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-        return `Auto-deployment merge from ${this.sourceBranch} to ${this.targetBranch} - ${timestamp}`;
-    }
-
-    validateConfiguration() {
-        const missing = [];
-
-        if (!this.collectionUrl) missing.push('TFVC_COLLECTION_URL');
-        if (!this.projectName) missing.push('TFVC_PROJECT_NAME');
-        if (!this.sourceBranch) missing.push('SOURCE_BRANCH');
-        if (!this.targetBranch) missing.push('TARGET_BRANCH');
-        if (!this.workspaceName) missing.push('TFVC_WORKSPACE');
-        if (!this.username) missing.push('TFVC_USERNAME');
-        if (!this.password) missing.push('TFVC_PAT or TFVC_PASSWORD');
-
-        if (missing.length) {
-            throw new Error(`Missing required TFVC configuration: ${missing.join(', ')}`);
-        }
-
-        if (!this.tfExePath) {
-            throw new Error('TF.exe not found. Install Visual Studio with Team Explorer.');
-        }
-    }
-
-    normalizeCollectionUrl(rawUrl) {
-        if (!rawUrl) {
-            return rawUrl;
-        }
-
-        try {
-            const parsed = new URL(rawUrl);
-            const host = parsed.hostname.toLowerCase();
-            this.collectionHost = host;
-            this.isAzureDevOpsHost = host.endsWith('visualstudio.com') || host.endsWith('dev.azure.com');
-
-            if (host.endsWith('visualstudio.com')) {
-                const trimmedPath = parsed.pathname.replace(/\/+$/, '');
-                if (!trimmedPath || trimmedPath === '' || trimmedPath === '/') {
-                    parsed.pathname = '/DefaultCollection';
-                    logger.info('Normalized TFVC collection URL to include DefaultCollection', {
-                        originalUrl: rawUrl,
-                        normalizedUrl: parsed.toString()
-                    });
-                }
-            }
-
-            return parsed.toString().replace(/\/+$/, '');
-        } catch (error) {
-            logger.warn('Failed to normalize TFVC collection URL', {
-                rawUrl,
-                error: error.message
-            });
-            return rawUrl;
-        }
-    }
-
-    async handleVersionBumpIfNeeded() {
-        if (!this.enableVersionBump()) {
-            return;
-        }
-
-        const hasChanges = await this.hasPendingMergeChanges();
-        if (!hasChanges) {
-            logger.info('No pending merge candidates detected â€“ skipping version bump');
-            return;
-        }
-
-        await this.bumpModuleVersion();
-    }
-
-    enableVersionBump() {
-        return Boolean(this.modelName && this.sourceLocalPath);
-    }
-
-    async hasPendingMergeChanges() {
-        try {
-            const preview = await this.executeTfCommand([
-                'merge',
-                this.sourceBranchPath,
-                this.targetBranchPath,
-                '/recursive',
-                '/noprompt',
-                '/preview'
-            ], {
-                cwd: this.targetLocalPath,
-                allowEmpty: true
-            });
-
-            const output = `${preview.stdout || ''}\n${preview.stderr || ''}`;
-            return !this.isNoPendingChangesMessage(output);
-        } catch (error) {
-            logger.warn('Unable to preview pending merge changes; assuming changes exist', {
-                error: error.message
-            });
-            return true;
-        }
-    }
-
-    async bumpModuleVersion() {
-        const descriptorPath = this.getDescriptorPath();
-        if (!descriptorPath) {
-            logger.warn('Descriptor file not found for version bump', { model: this.modelName });
-            return;
-        }
-
-        logger.info('Incrementing module version', { descriptorPath });
-
-        await this.executeTfCommand([
-            'edit',
-            descriptorPath,
-            '/noprompt'
-        ], {
-            cwd: path.dirname(descriptorPath),
-            allowEmpty: true
-        });
-
-        const xmlContent = fs.readFileSync(descriptorPath, 'utf8');
-        const version = this.parseDescriptorVersion(xmlContent);
-        const newRevision = version.revision + 1;
-
-        const revisionRegex = new RegExp(`(<VersionRevision>)(\\s*)${version.revision}(\\s*)(</VersionRevision>)`, 'i');
-        const updatedXml = xmlContent.replace(revisionRegex, `$1$2${newRevision}$3$4`);
-
         fs.writeFileSync(descriptorPath, updatedXml, 'utf8');
-
-        const versionLabel = `${version.major}.0.${version.minor}.${version.build}.${newRevision}`;
-        this.lastVersionLabel = versionLabel;
-        logger.info('Checking in version bump', { version: versionLabel });
-
-        await this.executeTfCommand([
-            'checkin',
-            descriptorPath,
-            `/comment:${this.modelName} ${versionLabel}`,
-            '/noprompt'
-        ], {
-            cwd: path.dirname(descriptorPath)
-        });
+        this.lastVersionLabel = `${version.major}.0.${version.minor}.${version.build}.${nextRevision}`;
     }
 
-    getDescriptorPath() {
-        if (!this.sourceLocalPath || !this.modelName) {
-            return null;
-        }
+    async checkInChanges() {
+        const comment = (this.lastVersionLabel
+            ? `${this.modelName} ${this.lastVersionLabel}`
+            : `Auto-deployment merge from ${this.sourceBranch} to ${this.targetBranch}`)
+            .replace(/"/g, '\'');
 
+        const result = await this.executeTfvcOperation('checkin', {
+            path: this.targetBranchPath,
+            comment
+        });
+
+        return result.changeset || null;
+    }
+
+    getExactMappedPath(serverPath) {
+        const normalized = serverPath.toLowerCase();
+        const match = this.workspaceMappings.find(mapping => mapping.serverPath.toLowerCase() === normalized);
+        return match ? match.localPath : null;
+    }
+
+    getMappedPathsForBranch(branchPath) {
+        const normalized = branchPath.toLowerCase();
+        return this.workspaceMappings
+            .filter(mapping => {
+                const serverPath = mapping.serverPath.toLowerCase();
+                return serverPath === normalized || serverPath.startsWith(`${normalized}/`);
+            })
+            .sort((left, right) => right.serverPath.length - left.serverPath.length);
+    }
+
+    async ensureLocalPath(localPath) {
+        if (!fs.existsSync(localPath)) {
+            fs.mkdirSync(localPath, { recursive: true });
+        }
+    }
+
+    getDescriptorPath(baseLocalPath) {
         const descriptorPath = path.join(
-            this.sourceLocalPath,
+            baseLocalPath,
             'Main',
             'Metadata',
             this.modelName,
@@ -844,59 +343,101 @@ class TFVCMerge {
     }
 
     parseDescriptorVersion(xmlContent) {
-        const resolveTag = (tag) => {
+        const readTag = (tag) => {
             const match = xmlContent.match(new RegExp(`<${tag}>(.*?)</${tag}>`, 'i'));
             if (!match) {
-                throw new Error(`Unable to locate ${tag} inside descriptor XML`);
+                throw new Error(`Unable to locate ${tag} in descriptor XML`);
             }
-            return match[1].trim();
+            return parseInt(match[1].trim(), 10);
         };
 
         return {
-            major: parseInt(resolveTag('VersionMajor'), 10),
-            minor: parseInt(resolveTag('VersionMinor'), 10),
-            build: parseInt(resolveTag('VersionBuild'), 10),
-            revision: parseInt(resolveTag('VersionRevision'), 10)
+            major: readTag('VersionMajor'),
+            minor: readTag('VersionMinor'),
+            build: readTag('VersionBuild'),
+            revision: readTag('VersionRevision')
         };
     }
 
-    shouldNotify() {
-        return process.env.SUPPRESS_STEP_NOTIFICATIONS !== 'true';
+    validateConfiguration() {
+        const required = [
+            ['TFVC_COLLECTION_URL', this.collectionUrl],
+            ['TFVC_PROJECT_NAME', this.projectName],
+            ['SOURCE_BRANCH', this.sourceBranch],
+            ['TARGET_BRANCH', this.targetBranch],
+            ['TFVC_WORKSPACE', this.workspaceName],
+            ['TFVC credential (TFVC_PAT/AZURE_PAT/TFVC_PASSWORD)', this.authSecret]
+        ];
+
+        const missing = required.filter(([, value]) => !value).map(([name]) => name);
+        if (missing.length > 0) {
+            throw new Error(`Missing required TFVC configuration: ${missing.join(', ')}`);
+        }
     }
 
-    getBooleanEnv(value, defaultValue = false) {
+    resolveCredential(mode) {
+        const normalizedMode = (mode || 'auto').trim().toLowerCase();
+        const tfvcPat = (process.env.TFVC_PAT || '').trim();
+        const azurePat = (process.env.AZURE_PAT || '').trim();
+        const password = (process.env.TFVC_PASSWORD || '').trim();
+
+        const patValue = tfvcPat || azurePat;
+        const patSource = tfvcPat ? 'TFVC_PAT' : (azurePat ? 'AZURE_PAT' : null);
+
+        if (normalizedMode === 'pat') {
+            return { value: patValue, source: patSource || 'PAT' };
+        }
+
+        if (normalizedMode === 'password') {
+            return { value: password, source: 'TFVC_PASSWORD' };
+        }
+
+        if (patValue) {
+            return { value: patValue, source: patSource || 'PAT' };
+        }
+
+        return { value: password, source: 'TFVC_PASSWORD' };
+    }
+
+    normalizeCollectionUrl(rawUrl) {
+        if (!rawUrl) {
+            return rawUrl;
+        }
+
+        const parsed = new URL(rawUrl);
+        if (parsed.hostname.toLowerCase().endsWith('visualstudio.com') && (!parsed.pathname || parsed.pathname === '/')) {
+            parsed.pathname = '/DefaultCollection';
+        }
+        return parsed.toString().replace(/\/+$/, '');
+    }
+
+    getBooleanEnv(value, defaultValue) {
         if (value === undefined || value === null || value === '') {
             return defaultValue;
         }
 
         const normalized = value.toString().trim().toLowerCase();
-        if (['1', 'true', 'yes', 'on'].includes(normalized)) {
-            return true;
-        }
-
-        if (['0', 'false', 'no', 'off'].includes(normalized)) {
-            return false;
-        }
-
+        if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+        if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
         return defaultValue;
+    }
+
+    shouldNotify() {
+        return process.env.SUPPRESS_STEP_NOTIFICATIONS !== 'true';
     }
 }
 
 if (require.main === module) {
-    const tfvcMerge = new TFVCMerge();
-    tfvcMerge.execute()
+    const runner = new TFVCMerge();
+    runner.execute()
         .then((result) => {
-            console.log('\ndYZ% TFVC merge completed successfully!');
-            console.log(`âœ” Result: ${result.message}`);
+            console.log(result.message);
             process.exit(0);
         })
         .catch((error) => {
-            console.error('\nðŸ’¥ TFVC merge failed:', error.message);
+            console.error(`TFVC branch operation failed: ${error.message}`);
             process.exit(1);
         });
 }
 
 module.exports = TFVCMerge;
-
-
-

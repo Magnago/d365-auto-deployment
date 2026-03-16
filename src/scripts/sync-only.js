@@ -5,75 +5,49 @@ const NotificationService = require('../core/notification-service');
 
 class SyncOnly {
     constructor() {
-        this.d365Sync = new D365Sync();
-        this.notificationService = new NotificationService();
-        this.deploymentId = 'SYNC-' + new Date().toISOString().replace(/[:.]/g, '-');
+        this.sync = new D365Sync();
+        this.notifications = new NotificationService();
+        this.executionId = `SYNC-${new Date().toISOString().replace(/[:.]/g, '-')}`;
     }
 
     async execute() {
-        const startTime = Date.now();
+        const startedAt = Date.now();
+
         try {
-            logger.info('🔄 Starting D365 Database Sync Only');
+            logger.info('Starting D365 database synchronization');
 
             if (this.shouldNotify()) {
-                await this.notificationService.sendNotification('start', {
-                    deploymentId: this.deploymentId,
-                    stepName: 'Sync Only',
-                    environmentType: 'Detecting...',
-                    model: 'N/A (Database Sync)',
-                    sourceBranch: 'N/A (Standalone)',
-                    targetBranch: 'N/A (Standalone)'
+                await this.notifications.sendNotification('start', {
+                    deploymentId: this.executionId
                 });
             }
 
-            const syncResult = await this.d365Sync.performFullSync({
-                timeout: parseInt(process.env.SYNC_TIMEOUT) || 30 * 60 * 1000, // 30 minutes default
+            const result = await this.sync.performFullSync({
+                timeout: Number(process.env.SYNC_TIMEOUT) || 30 * 60 * 1000,
                 deploymentLogDir: './logs/sync'
             });
 
-            if (syncResult.success) {
-                logger.info('✅ D365 Database Sync completed successfully', {
-                    syncMode: syncResult.syncMode,
-                    totalExecutionTime: syncResult.totalExecutionTime,
-                    stepsCompleted: syncResult.stepsCompleted
+            if (this.shouldNotify()) {
+                await this.notifications.sendNotification('success', {
+                    deploymentId: this.executionId,
+                    executionTime: Date.now() - startedAt
                 });
-
-                if (this.shouldNotify()) {
-                    await this.notificationService.sendNotification('success', {
-                        deploymentId: this.deploymentId,
-                        stepName: 'Sync Only',
-                        environmentType: syncResult.environmentType || 'Unknown',
-                        model: 'N/A (Database Sync)',
-                        sourceBranch: 'N/A (Standalone)',
-                        targetBranch: 'N/A (Standalone)',
-                        executionTime: Date.now() - startTime,
-                        syncResult: syncResult
-                    });
-                }
-
-                return {
-                    success: true,
-                    message: 'Database synchronization completed successfully',
-                    details: syncResult
-                };
-            } else {
-                throw new Error(syncResult.error || 'Database sync failed');
             }
 
+            return {
+                success: true,
+                message: 'Database synchronization completed successfully',
+                details: result
+            };
         } catch (error) {
-            logger.error(`❌ D365 Database Sync failed: ${error.message}`);
+            logger.error('D365 database synchronization failed', { error: error.message });
 
             if (this.shouldNotify()) {
-                await this.notificationService.sendNotification('failure', {
-                    deploymentId: this.deploymentId,
-                    stepName: 'Sync Only',
-                    environmentType: 'Unknown',
-                    model: 'N/A (Database Sync)',
-                    sourceBranch: 'N/A (Standalone)',
-                    targetBranch: 'N/A (Standalone)',
-                    executionTime: Date.now() - startTime,
+                await this.notifications.sendNotification('failure', {
+                    deploymentId: this.executionId,
                     failedStep: 'Database Sync',
-                    error: error.message
+                    error: error.message,
+                    executionTime: Date.now() - startedAt
                 });
             }
 
@@ -86,19 +60,12 @@ class SyncOnly {
     }
 }
 
-// Execute if run directly
 if (require.main === module) {
-    const syncOnly = new SyncOnly();
-    syncOnly.execute()
-        .then((result) => {
-            console.log('\n🎉 D365 database sync completed successfully!');
-            console.log(`✅ Sync Mode: ${result.details.syncMode}`);
-            console.log(`⏱️  Duration: ${result.details.totalExecutionTime}ms`);
-            console.log(`📊 Steps Completed: ${result.details.stepsCompleted}`);
-            process.exit(0);
-        })
+    const runner = new SyncOnly();
+    runner.execute()
+        .then(() => process.exit(0))
         .catch((error) => {
-            console.error('\n💥 D365 database sync failed:', error.message);
+            console.error(`Database sync failed: ${error.message}`);
             process.exit(1);
         });
 }

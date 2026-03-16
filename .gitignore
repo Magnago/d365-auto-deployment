@@ -1,11 +1,45 @@
+# Environment / secrets
 .env
 .env.*
+
+# Dependencies
 node_modules/
+package-lock.json
+
+# Build output
+dist/
+*.exe
+
+# External libraries (DLLs)
+lib/tfs/
+
+# Logs & reports
 logs/
 deployment-reports/
-.claude/
-config/environments.local*.json
-dist/
 *.log
+
+# Temp / backup files
 *.tmp
 *.bak
+*.swp
+*~
+
+# OS files
+Thumbs.db
+Desktop.ini
+ehthumbs.db
+
+# IDE / editor
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Local config overrides
+config/environments.local*.json
+
+# Claude Code
+.claude/
+
+# Diagnostic / troubleshooting artifacts
+auth-issue.txt

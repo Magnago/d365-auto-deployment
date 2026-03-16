@@ -1,64 +1,147 @@
 # D365 F&O Automated Deployment Solution
 
-A streamlined automated deployment solution for Dynamics 365 Finance & Operations that handles complete deployment workflows from TFVC source control to D365 operations.
+A fully automated deployment pipeline for Dynamics 365 Finance & Operations that orchestrates TFVC source control operations, X++ compilation, database synchronization, SSRS report deployment, and Teams notifications.
 
-## 🚀 Features
+## Features
 
-- **Automated Source Control**: TFVC branch operations (Dev → Dev-test)
-- **Real D365 Build Integration**: Full X++ code compilation with xppc.exe
-- **Database Synchronization**: Complete database sync using SyncEngine.exe
-- **Report Deployment**: Automated SSRS report deployment
-- **Cross-Environment Support**: Works with local (C:) and cloud (K:) environments
-- **Notifications**: Email notification system for deployment status
-- **Comprehensive Logging**: Detailed logs for troubleshooting and audit trails
+- **TFVC Branch Operations** - Automated merge from source to target branch with conflict detection and version bumping
+- **X++ Compilation** - Full model build using `xppc.exe`
+- **Database Synchronization** - Schema sync via `SyncEngine.exe` against AxDB
+- **SSRS Report Deployment** - Automated report deployment using D365's built-in PowerShell script
+- **Service Control** - Automatic stop/start of IIS, SSRS, Batch, DMF, and MR services around deployments
+- **Cross-Environment Support** - Works with local (C: drive) and cloud (K: drive) D365 environments
+- **Teams Notifications** - Deployment start, success, and failure notifications via webhook
+- **Comprehensive Logging** - Winston-based structured logging with file rotation
+- **Standalone Executable** - Can be packaged as a Windows `.exe` for distribution without Node.js
 
-## 📋 Prerequisites
+## Prerequisites
 
-### System Requirements
-- **Windows Server** (2016 or later)
-- **Node.js** 16.x or later
-- **PowerShell** 5.1 or later
-- **Visual Studio** 2019/2022 with Team Explorer (for TFVC)
-- **D365 F&O** development environment
+- **Windows Server 2016+**
+- **Node.js 16+**
+- **PowerShell 5.1+**
+- **Visual Studio 2019/2022** with Team Explorer (for TFS assemblies)
+- **D365 F&O** development environment (provides `xppc.exe`, `SyncEngine.exe`, report deployment scripts)
+- **TFVC workspace** already configured locally with source and target branches mapped
 
-### Software Dependencies
+## Quick Start
+
+### 1. Install Dependencies
+
 ```bash
-# Install Node.js dependencies
 npm install
 ```
 
-## ⚙️ Configuration
+### 2. Set Up TFS Libraries
+
+Copy the required .NET TFS assemblies from Visual Studio into `lib/tfs`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File setup-tfs-libs.ps1
+```
+
+### 3. Configure Environment
+
+```bash
+cp .env.example .env
+# Edit .env with your credentials and settings
+```
+
+### 4. Verify TFVC Authentication
+
+```bash
+npm run tfvc:auth
+```
+
+### 5. Run Deployment
+
+```bash
+# Full pipeline
+npm run dev
+
+# Or run individual steps
+npm run tfvc       # TFVC merge only
+npm run build      # D365 build only
+npm run sync       # Database sync only
+npm run reports    # Report deployment only
+```
+
+## Configuration
 
 ### Environment Variables
-Copy `.env.example` to `.env` and configure:
+
+Copy `.env.example` to `.env` and configure the following:
+
+**TFVC / Source Control:**
 
 ```env
-# TFVC Configuration
-TFVC_USERNAME=buildsvc@example.com
-TFVC_PASSWORD=your-tfvc-password-or-pat
-TFVC_PAT=optional-personal-access-token
-TFVC_PROJECT_NAME=YourTFVCProject
+TFVC_COLLECTION_URL=https://your-organization.visualstudio.com/DefaultCollection
+TFVC_PROJECT_NAME=YourD365Project
 SOURCE_BRANCH=Dev
 TARGET_BRANCH=Dev-test
 TFVC_WORKSPACE=AutoDeploymentWorkspace
-# Optional when the workspace is owned by another account
-TFVC_WORKSPACE_OWNER=YourDomain\ServiceAccount
-TFVC_ALLOW_INTEGRATED_AUTH_FALLBACK=false
-
-# D365 Configuration
-D365_MODEL=YourD365Model
-ENVIRONMENT_TYPE=local
-
-# Timeouts (in milliseconds)
-BUILD_TIMEOUT=3600000
-SYNC_TIMEOUT=1800000
-REPORTS_TIMEOUT=900000
+TFVC_WORKSPACE_OWNER=YourDomain\ServiceAccount   # Optional, if workspace owned by another account
+TFVC_USERNAME=buildsvc@example.com
+TFVC_PASSWORD=your-tfvc-password
+TFVC_PAT=optional-personal-access-token           # Preferred over password
+AZURE_PAT=optional-azure-devops-pat
+TFVC_CREDENTIAL_MODE=auto                         # auto (PAT first), pat, or password
 ```
 
-Set `SKIP_TFVC_MERGE_OPERATIONS=true` for environments where you want to bypass the descriptor update + TFVC merge step while still running build, sync, and report deployment.
+**D365:**
+
+```env
+D365_MODEL=YourD365Model
+D365_MODULE=YourD365Model
+ENVIRONMENT_TYPE=auto                             # auto, local, or cloud
+```
+
+**Pipeline Steps:**
+
+```env
+ENABLE_TFVC_STEP=true
+ENABLE_BUILD_STEP=true
+ENABLE_SYNC_STEP=true
+ENABLE_REPORTS_STEP=true
+SKIP_TFVC_MERGE_OPERATIONS=false                  # true = skip merge, only get latest on target
+```
+
+**Service Control:**
+
+```env
+ENABLE_SERVICE_CONTROL=true
+SERVICE_STOP_COMMANDS=net stop W3SVC,net stop SQLServerReportingServices,net stop DynamicsAxBatch,net stop Microsoft.Dynamics.AX.Framework.Tools.DMF.SSISHelperService.exe,net stop MR2012ProcessService
+SERVICE_START_COMMANDS=net start W3SVC,net start SQLServerReportingServices,net start DynamicsAxBatch,net start Microsoft.Dynamics.AX.Framework.Tools.DMF.SSISHelperService.exe,net start MR2012ProcessService
+```
+
+**Notifications:**
+
+```env
+TEAMS_WEBHOOK_URL=https://outlook.office.com/webhook/your-webhook-url
+NOTIFICATION_ENABLED=true
+```
+
+**Timeouts (milliseconds):**
+
+```env
+BUILD_TIMEOUT=3600000     # 1 hour
+SYNC_TIMEOUT=1800000      # 30 minutes
+REPORTS_TIMEOUT=900000    # 15 minutes
+```
+
+**Logging:**
+
+```env
+LOG_LEVEL=info
+LOG_FILE_PATH=./logs/deployment.log
+MAX_LOG_SIZE=10m
+MAX_LOG_FILES=5
+```
+
+> **Note:** `TFVC_CREDENTIAL_MODE=auto` prefers `TFVC_PAT`/`AZURE_PAT` before `TFVC_PASSWORD`. The TFVC workspace defined by `TFVC_WORKSPACE` must already exist locally with both `$/{project}/{SOURCE_BRANCH}` and `$/{project}/{TARGET_BRANCH}` mapped.
 
 ### Environment Paths
-Configure environment paths in `config/environments.json`:
+
+Configure D365 paths in `config/environments.json`:
 
 ```json
 {
@@ -77,139 +160,128 @@ Configure environment paths in `config/environments.json`:
 }
 ```
 
-> **Note:** When a Personal Access Token (PAT) is available, set `TFVC_PAT` (or point `TFVC_PASSWORD` to the PAT) so the automated merge can authenticate without relying on an existing Visual Studio session. Before running `npm run tfvc`, open Visual Studio (or `tf.exe`) and make sure the workspace defined by `TFVC_WORKSPACE` already exists locally with both `$/{project}/${SOURCE_BRANCH}` and `$/{project}/${TARGET_BRANCH}` mapped. The script now validates those mappings (and auto-detects the workspace owner, or you can override it via `TFVC_WORKSPACE_OWNER`) and fails (with a Teams notification) if the workspace is missing or incomplete, and it will stop immediately (also notifying Teams) if `tf merge` surfaces any conflicts so you can resolve them manually.
+### Notification Settings
 
-## 🚀 Quick Start
+Configure notification behavior in `config/deployment-config.json`:
 
-### 1. Install Dependencies
-```bash
-npm install
+```json
+{
+  "notifications": {
+    "onStart": { "enabled": true, "channels": ["teams"], "includeDetails": true },
+    "onSuccess": { "enabled": true, "channels": ["teams"], "includeDetails": true },
+    "onFailure": { "enabled": true, "channels": ["teams"], "includeDetails": true, "includeLogs": true }
+  }
+}
 ```
 
-### 2. Configure Environment
-```bash
-cp .env.example .env
-# Edit .env with your credentials and settings
+## Deployment Pipeline
+
+The pipeline executes these steps in sequence:
+
+1. **Initialize** - Generate deployment ID, validate configuration
+2. **Send Start Notification** - Post "Deployment Started" to Teams
+3. **Stop Services** - Run `SERVICE_STOP_COMMANDS` to free locked DLLs *(if enabled)*
+4. **TFVC Operation** *(if enabled)*
+   - **Full merge mode:** Get latest from source → merge into target → check for conflicts → bump descriptor version → check in → get latest on target
+   - **Skip merge mode** (`SKIP_TFVC_MERGE_OPERATIONS=true`): Get latest on target branch only
+5. **Build** - Compile the D365 model using `xppc.exe` *(if enabled)*
+6. **Database Sync** - Run `SyncEngine.exe` with `syncmode=fullall` against AxDB *(if enabled)*
+7. **Deploy Reports** - Execute `DeployAllReportsToSSRS.ps1` *(if enabled)*
+8. **Start Services** - Run `SERVICE_START_COMMANDS`
+9. **Completion Notification** - Post success or failure to Teams with execution time and error details
+
+Each step can be independently enabled/disabled via `ENABLE_*_STEP` environment variables. On failure, the pipeline attempts to restart services before sending the failure notification.
+
+## NPM Scripts
+
+| Script | Command | Description |
+|--------|---------|-------------|
+| `npm run dev` | Full pipeline | Run the complete deployment pipeline |
+| `npm run tfvc` | TFVC only | Run TFVC merge operations |
+| `npm run tfvc:auth` | Auth diagnostic | Troubleshoot TFVC authentication |
+| `npm run build` | Build only | Compile the D365 model |
+| `npm run sync` | Sync only | Run database synchronization |
+| `npm run reports` | Reports only | Deploy SSRS reports |
+| `npm run build:exe` | Package | Build standalone Windows executable |
+
+## Project Structure
+
+```
+src/
+  deployment-pipeline.js          # Main pipeline orchestrator
+  core/
+    logger.js                     # Winston-based structured logging
+    notification-service.js       # Teams webhook notifications
+    powershell-runner.js          # PowerShell process execution wrapper
+    d365-environment.js           # Environment detection (local/cloud)
+  modules/
+    d365-build.js                 # X++ compilation via xppc.exe
+    d365-sync.js                  # Database sync via SyncEngine.exe
+    d365-reports.js               # SSRS report deployment
+  scripts/
+    tfvc-merge.js                 # TFVC merge workflow orchestration
+    tfvc-operations.ps1           # .NET-based TFVC operations (bypasses TF.exe)
+    tfvc-auth-diagnose.ps1        # TFVC authentication diagnostic tool
+    build-only.js                 # Standalone build entry point
+    sync-only.js                  # Standalone sync entry point
+    reports-only.js               # Standalone reports entry point
+config/
+  environments.json               # D365 path configuration per environment
+  deployment-config.json          # Notification channel settings
+setup-tfs-libs.ps1                # Copies TFS assemblies from Visual Studio
+run-pipeline.ps1                  # PowerShell wrapper to launch the pipeline
+.env.example                      # Environment variable template
 ```
 
-### 3. Run Deployment
-```bash
-# Execute complete deployment pipeline
-npm run dev
-```
+## Building a Standalone Executable
 
-### Build Standalone Executable (Windows)
 ```bash
-# Install deps once
-npm install
-
-# Produce dist/d365-auto-deployment.exe (includes JS + config assets)
 npm run build:exe
 ```
-Copy the resulting `dist/d365-auto-deployment.exe`, your `.env`, and the `config/` directory to any Windows server (with PowerShell + D365 prerequisites) and run the EXE directly—no Node.js installation required on that target machine.
 
-## 📁 Project Structure
+This produces `dist/d365-auto-deployment.exe`. Copy the executable along with your `.env` file and `config/` directory to any Windows server with D365 prerequisites - no Node.js installation required.
 
-```
-├── src/
-│   ├── deployment-pipeline.js     # Main deployment orchestrator
-│   ├── core/
-│   │   ├── tfvc-simple.js         # TFVC operations (workspace, merge)
-│   │   ├── logger.js              # Logging system
-│   │   ├── notification-service.js # Email notifications
-│   │   └── powershell-runner.js   # PowerShell execution wrapper
-│   └── modules/
-│       ├── d365-build.js          # D365 model compilation
-│       ├── d365-sync.js           # Database synchronization
-│       └── d365-reports.js        # Report deployment
-├── config/
-│   └── environments.json          # Environment configuration
-├── deployment-reports/            # Deployment execution reports
-├── .env.example                   # Environment variables template
-└── package.json                   # Dependencies and scripts
-```
+## Troubleshooting
 
-## 🔄 Deployment Workflow
+### TFVC Authentication
 
-The automated pipeline executes these steps in sequence:
+Run `npm run tfvc:auth` to diagnose authentication issues. Common problems:
 
-1. **Workspace Setup**: Check/create TFVC workspace and map branches
-2. **Source Merge**: Merge changes from source to target branch
-3. **D365 Build**: Compile the specified model using xppc.exe
-4. **Database Sync**: Synchronize database schema using SyncEngine.exe
-5. **Report Deployment**: Deploy SSRS reports for the model
-6. **Notifications**: Send deployment status via email
+- **TF30063 Authorization Errors** - Verify credentials, check for MFA conflicts, ensure PAT has Code (Read & Write) scope
+- **Workspace not found** - Ensure the workspace exists locally and both branches are mapped
+- **Implicit auth masking credentials** - Set `TFVC_CREDENTIAL_MODE=pat` to force PAT-only authentication
 
-## 📊 Monitoring & Logging
+### D365 Build Failures
 
-### Deployment Reports
-Each execution generates:
-- `deployment-{timestamp}.json` - Detailed execution report
-- `deployment-{timestamp}-summary.txt` - Human-readable summary
+- Verify `xppc.exe` exists in `PackagesLocalDirectory\bin`
+- Check that the model name matches the descriptor file
+- Review build logs in the `logs/` directory
 
-### Real-time Logging
-- Console output with step-by-step progress
-- Structured logging with timestamps and metadata
-- Error tracking and troubleshooting information
+### Database Sync Issues
 
-## 🔧 Troubleshooting
+- Confirm SQL Server is running and AxDB is accessible
+- Check `SyncEngine.exe` path in the environment configuration
+- Verify the service account has database permissions
 
-### Common Issues
+### Report Deployment
 
-1. **TF30063 Authorization Errors**
-   - Ensure TFVC credentials are correct
-   - Check for 2-factor authentication conflicts
-   - Verify Visual Studio authentication
-
-2. **D365 Build Failures**
-   - Check D365 F&O installation paths
-   - Verify model name and permissions
-   - Review xppc.exe availability
-
-3. **Database Sync Issues**
-   - Confirm database connectivity
-   - Check SyncEngine.exe path
-   - Verify SQL Server permissions
+- Ensure SSRS is running and accessible
+- Verify `DeployAllReportsToSSRS.ps1` exists at the expected path
+- Check that registry values for BinDir/InstallDir are correct
 
 ### Log Locations
-- Console: Real-time deployment output
-- Reports: `deployment-reports/` directory
-- Logs: Generated automatically with each execution
 
-## 📝 Scripts
+- **Console** - Real-time deployment output
+- **File logs** - `logs/deployment.log` (configurable)
+- **Deployment logs** - `logs/{deploymentId}/`
 
-### Available NPM Scripts
-```bash
-npm run dev          # Run full deployment pipeline
-npm test             # Run TFVC connection test
-npm start            # Alias for npm run dev
-```
+## Security
 
-## 🔐 Security
+- Credentials are stored in environment variables (`.env` file) - never committed to source control
+- PowerShell output is sanitized to remove credentials from logs
+- TFVC authentication supports PAT (recommended) and password modes
+- No hardcoded secrets in source code
 
-- Credentials stored in environment variables (.env file)
-- No hardcoded passwords or sensitive data
-- TFVC authentication uses secure login methods
-- PowerShell execution with proper error handling
+## License
 
-## 📈 Performance
-
-- **Build Time**: Typically 1-5 minutes per model
-- **Database Sync**: 5-30 minutes depending on changes
-- **Report Deployment**: 2-10 minutes
-- **Total Duration**: 10-45 minutes average
-
-## 🤝 Contributing
-
-1. Follow the existing code structure
-2. Test all TFVC operations thoroughly
-3. Update documentation for new features
-4. Maintain backward compatibility
-
-## 📄 License
-
-This project is proprietary software for your organization.
-
----
-
-**Support**: For issues or questions, contact your deployment engineering team.
+MIT

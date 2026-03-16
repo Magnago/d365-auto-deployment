@@ -1,82 +1,57 @@
-﻿require('dotenv').config();
+require('dotenv').config();
 const D365Build = require('../modules/d365-build');
 const logger = require('../core/logger');
 const NotificationService = require('../core/notification-service');
 
 class BuildOnly {
     constructor() {
-        this.d365Build = new D365Build();
         this.modelName = process.env.D365_MODEL || 'YourD365Model';
-        this.notificationService = new NotificationService();
-        this.deploymentId = 'BUILD-' + new Date().toISOString().replace(/[:.]/g, '-');
+        this.build = new D365Build();
+        this.notifications = new NotificationService();
+        this.executionId = `BUILD-${new Date().toISOString().replace(/[:.]/g, '-')}`;
     }
 
     async execute() {
-        const startTime = Date.now();
+        const startedAt = Date.now();
+
         try {
-            logger.info('ðŸ”¨ Starting D365 Build Only', {
-                model: this.modelName
-            });
+            logger.info('Starting D365 build', { model: this.modelName });
 
             if (this.shouldNotify()) {
-                await this.notificationService.sendNotification('start', {
-                    deploymentId: this.deploymentId,
-                    stepName: 'Build Only',
-                    environmentType: 'Detecting...',
-                    model: this.modelName,
-                    sourceBranch: 'N/A (Standalone)',
-                    targetBranch: 'N/A (Standalone)'
+                await this.notifications.sendNotification('start', {
+                    deploymentId: this.executionId,
+                    model: this.modelName
                 });
             }
 
-            const buildResult = await this.d365Build.buildModel(this.modelName, {
-                timeout: parseInt(process.env.BUILD_TIMEOUT) || 60 * 60 * 1000, // 1 hour default
+            const result = await this.build.buildModel(this.modelName, {
+                timeout: Number(process.env.BUILD_TIMEOUT) || 60 * 60 * 1000,
                 deploymentLogDir: './logs/build'
             });
 
-            if (buildResult.success) {
-                logger.info('âœ… D365 Build completed successfully', {
+            if (this.shouldNotify()) {
+                await this.notifications.sendNotification('success', {
+                    deploymentId: this.executionId,
                     model: this.modelName,
-                    executionTime: buildResult.executionTime,
-                    environmentType: buildResult.environmentType
+                    executionTime: Date.now() - startedAt
                 });
-
-                if (this.shouldNotify()) {
-                    await this.notificationService.sendNotification('success', {
-                        deploymentId: this.deploymentId,
-                        stepName: 'Build Only',
-                        environmentType: buildResult.environmentType,
-                        model: this.modelName,
-                        sourceBranch: 'N/A (Standalone)',
-                        targetBranch: 'N/A (Standalone)',
-                        executionTime: Date.now() - startTime,
-                        buildResult: buildResult
-                    });
-                }
-
-                return {
-                    success: true,
-                    message: 'Model build completed successfully',
-                    details: buildResult
-                };
-            } else {
-                throw new Error(buildResult.stderr || 'Model build failed');
             }
 
+            return {
+                success: true,
+                message: 'Build completed successfully',
+                details: result
+            };
         } catch (error) {
-            logger.error(`âŒ D365 Build failed: ${error.message}`);
+            logger.error('D365 build failed', { error: error.message });
 
             if (this.shouldNotify()) {
-                await this.notificationService.sendNotification('failure', {
-                    deploymentId: this.deploymentId,
-                    stepName: 'Build Only',
-                    environmentType: 'Unknown',
+                await this.notifications.sendNotification('failure', {
+                    deploymentId: this.executionId,
                     model: this.modelName,
-                    sourceBranch: 'N/A (Standalone)',
-                    targetBranch: 'N/A (Standalone)',
-                    executionTime: Date.now() - startTime,
-                    failedStep: 'Model Build',
-                    error: error.message
+                    failedStep: 'Build Model',
+                    error: error.message,
+                    executionTime: Date.now() - startedAt
                 });
             }
 
@@ -89,23 +64,18 @@ class BuildOnly {
     }
 }
 
-// Execute if run directly
 if (require.main === module) {
-    const buildOnly = new BuildOnly();
-    buildOnly.execute()
+    const runner = new BuildOnly();
+    runner.execute()
         .then((result) => {
-            console.log('\nðŸŽ‰ D365 build completed successfully!');
-            console.log(`âœ… Model: ${result.details.model}`);
-            console.log(`â±ï¸  Duration: ${result.details.executionTime}ms`);
-            console.log(`ðŸŒ Environment: ${result.details.environmentType}`);
+            console.log('Build completed successfully');
+            console.log(`Model: ${result.details.model}`);
             process.exit(0);
         })
         .catch((error) => {
-            console.error('\nðŸ’¥ D365 build failed:', error.message);
+            console.error(`Build failed: ${error.message}`);
             process.exit(1);
         });
 }
 
 module.exports = BuildOnly;
-
-
