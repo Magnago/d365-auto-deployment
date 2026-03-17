@@ -12,11 +12,13 @@
 #   status      - Get pending changes
 #   checkin     - Check in pending changes
 #   edit        - Pend edit on a file
+#   mergecandidates - Check for unmerged changesets between branches
+#   resolveconflicts - Auto-resolve conflicts under a path (AcceptTheirs)
 #   conflicts   - Query merge conflicts
 
 param(
     [Parameter(Mandatory=$true)]
-    [ValidateSet("workspaces","getlatest","merge","status","checkin","edit","conflicts")]
+    [ValidateSet("workspaces","getlatest","merge","mergecandidates","resolveconflicts","status","checkin","edit","conflicts")]
     [string]$Operation,
 
     [string]$JsonArgs = "{}",
@@ -198,6 +200,76 @@ try {
             }
         }
 
+        "mergecandidates" {
+            $sourcePath = $args_obj.sourcePath
+            $targetPath = $args_obj.targetPath
+            if (-not $sourcePath -or -not $targetPath) { throw "sourcePath and targetPath are required" }
+
+            $candidates = $vcs.GetMergeCandidates($sourcePath, $targetPath, [Microsoft.TeamFoundation.VersionControl.Client.RecursionType]::Full)
+
+            $changesets = @()
+            $count = 0
+            if ($candidates) {
+                $count = $candidates.Length
+                foreach ($mc in $candidates) {
+                    $changesets += @{
+                        changesetId = $mc.Changeset.ChangesetId
+                        owner = $mc.Changeset.OwnerDisplayName
+                        comment = $mc.Changeset.Comment
+                        date = $mc.Changeset.CreationDate.ToString("o")
+                    }
+                }
+            }
+
+            Write-JsonResult @{
+                success = $true
+                sourcePath = $sourcePath
+                targetPath = $targetPath
+                count = $count
+                changesets = $changesets
+            }
+        }
+
+        "resolveconflicts" {
+            $path = $args_obj.path
+            $resolution = $args_obj.resolution  # AcceptTheirs, AcceptYours, AcceptMerge
+            if (-not $path) { throw "path is required" }
+            if (-not $resolution) { $resolution = "AcceptTheirs" }
+
+            $ws = Get-TfvcWorkspace
+            $conflicts = $ws.QueryConflicts(@($path), $true)
+
+            $resolved = @()
+            $failed = @()
+            if ($conflicts) {
+                foreach ($c in $conflicts) {
+                    try {
+                        $resolutionType = [Microsoft.TeamFoundation.VersionControl.Client.Resolution]::$resolution
+                        $c.Resolution = $resolutionType
+                        $ws.ResolveConflict($c)
+                        $resolved += @{
+                            serverItem = if ($c.YourServerItem) { $c.YourServerItem } else { $c.FileName }
+                            resolution = $resolution
+                        }
+                    } catch {
+                        $failed += @{
+                            serverItem = if ($c.YourServerItem) { $c.YourServerItem } else { $c.FileName }
+                            error = $_.Exception.Message
+                        }
+                    }
+                }
+            }
+
+            Write-JsonResult @{
+                success = $true
+                path = $path
+                resolvedCount = $resolved.Length
+                failedCount = $failed.Length
+                resolved = $resolved
+                failed = $failed
+            }
+        }
+
         "status" {
             $path = $args_obj.path
             if (-not $path) { throw "path is required" }
@@ -230,18 +302,22 @@ try {
             $conflicts = $ws.QueryConflicts(@($path), $true)
 
             $conflictList = @()
-            foreach ($c in $conflicts) {
-                $conflictList += @{
-                    serverItem = $c.YourServerItem
-                    type = $c.ConflictType.ToString()
-                    resolution = $c.Resolution.ToString()
+            $conflictCount = 0
+            if ($conflicts) {
+                $conflictCount = $conflicts.Length
+                foreach ($c in $conflicts) {
+                    $conflictList += @{
+                        serverItem = if ($c.YourServerItem) { $c.YourServerItem } else { $c.FileName }
+                        type = if ($c.ConflictType) { $c.ConflictType.ToString() } else { "Unknown" }
+                        resolution = if ($c.Resolution) { $c.Resolution.ToString() } else { "None" }
+                    }
                 }
             }
 
             Write-JsonResult @{
                 success = $true
                 path = $path
-                count = $conflicts.Length
+                count = $conflictCount
                 conflicts = $conflictList
             }
         }

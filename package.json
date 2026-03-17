@@ -10,7 +10,8 @@
     "build": "node src/scripts/build-only.js",
     "sync": "node src/scripts/sync-only.js",
     "reports": "node src/scripts/reports-only.js",
-    "build:exe": "pkg src/deployment-pipeline.js --targets node18-win-x64 --output dist/d365-auto-deployment.exe"
+    "build:exe": "pkg src/deployment-pipeline.js --targets node18-win-x64 --output dist/d365-auto-deployment.exe",
+    "test": "jest --verbose"
   },
   "keywords": [
     "d365",
@@ -28,6 +29,7 @@
     "winston": "^3.11.0"
   },
   "devDependencies": {
+    "jest": "^30.3.0",
     "nodemon": "^3.0.2",
     "pkg": "^5.8.1"
   },

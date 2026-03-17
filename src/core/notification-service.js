@@ -66,6 +66,7 @@ class NotificationService {
     buildTeamsMessage(type, data, options = {}) {
         const facts = [];
         if (options.includeDetails !== false) {
+            if (data.environmentUrl) facts.push({ name: 'Environment URL', value: data.environmentUrl });
             if (data.model) facts.push({ name: 'Model', value: data.model });
             if (data.sourceBranch) facts.push({ name: 'Source Branch', value: data.sourceBranch });
             if (data.targetBranch) facts.push({ name: 'Target Branch', value: data.targetBranch });

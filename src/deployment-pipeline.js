@@ -8,6 +8,7 @@ const BuildOnly = require('./scripts/build-only');
 const SyncOnly = require('./scripts/sync-only');
 const ReportsOnly = require('./scripts/reports-only');
 const NotificationService = require('./core/notification-service');
+const D365Environment = require('./core/d365-environment');
 const logger = require('./core/logger');
 
 const execAsync = promisify(exec);
@@ -53,6 +54,9 @@ class DeploymentPipeline {
         this.startTime = null;
         this.logDirectory = null;
         this.serviceStartRecorded = false;
+        this.d365Env = new D365Environment();
+        this.environmentUrl = null;
+        this.environmentName = null;
     }
 
     async execute() {
@@ -64,12 +68,7 @@ class DeploymentPipeline {
 
         try {
             await this.initialize();
-            await this.notifications.sendNotification('start', {
-                deploymentId: this.deploymentId,
-                model: this.modelName,
-                sourceBranch: this.sourceBranch,
-                targetBranch: this.targetBranch
-            });
+            await this.notifications.sendNotification('start', this.notificationData());
 
             steps.push(await this.executeServiceStopStep());
 
@@ -90,13 +89,9 @@ class DeploymentPipeline {
                     results.hasChanges = false;
                     results.message = 'Pipeline completed - no changes to merge';
 
-                    await this.notifications.sendNotification('success', {
-                        deploymentId: this.deploymentId,
-                        model: this.modelName,
-                        sourceBranch: this.sourceBranch,
-                        targetBranch: this.targetBranch,
+                    await this.notifications.sendNotification('success', this.notificationData({
                         executionTime: results.totalDuration
-                    });
+                    }));
 
                     return results;
                 }
@@ -110,13 +105,9 @@ class DeploymentPipeline {
             steps.push(await this.executeServiceStartStep(true));
 
             const results = this.buildResults(steps);
-            await this.notifications.sendNotification('success', {
-                deploymentId: this.deploymentId,
-                model: this.modelName,
-                sourceBranch: this.sourceBranch,
-                targetBranch: this.targetBranch,
+            await this.notifications.sendNotification('success', this.notificationData({
                 executionTime: results.totalDuration
-            });
+            }));
 
             logger.info('Deployment completed successfully', {
                 deploymentId: this.deploymentId,
@@ -140,15 +131,11 @@ class DeploymentPipeline {
                 });
             }
 
-            await this.notifications.sendNotification('failure', {
-                deploymentId: this.deploymentId,
-                model: this.modelName,
-                sourceBranch: this.sourceBranch,
-                targetBranch: this.targetBranch,
+            await this.notifications.sendNotification('failure', this.notificationData({
                 failedStep,
                 error: error.message,
                 executionTime: Date.now() - this.startTime
-            });
+            }));
 
             logger.error('Deployment pipeline failed', {
                 deploymentId: this.deploymentId,
@@ -171,13 +158,35 @@ class DeploymentPipeline {
         this.logDirectory = path.join(process.cwd(), 'logs', this.deploymentId);
         await fs.ensureDir(this.logDirectory);
 
+        try {
+            const envInfo = await this.d365Env.getEnvironmentInfo();
+            this.environmentUrl = envInfo.url || null;
+            this.environmentName = envInfo.name || null;
+        } catch (_) {
+            // Environment info is best-effort
+        }
+
         logger.info('Deployment pipeline initialized', {
             deploymentId: this.deploymentId,
             logDirectory: this.logDirectory,
             model: this.modelName,
             sourceBranch: this.sourceBranch,
-            targetBranch: this.targetBranch
+            targetBranch: this.targetBranch,
+            environmentUrl: this.environmentUrl,
+            environmentName: this.environmentName
         });
+    }
+
+    notificationData(extra = {}) {
+        const base = {
+            deploymentId: this.deploymentId,
+            model: this.modelName,
+            sourceBranch: this.sourceBranch,
+            targetBranch: this.targetBranch
+        };
+        if (this.environmentUrl) base.environmentUrl = this.environmentUrl;
+        if (this.environmentName) base.environmentName = this.environmentName;
+        return { ...base, ...extra };
     }
 
     validateConfiguration() {

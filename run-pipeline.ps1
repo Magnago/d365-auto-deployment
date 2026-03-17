@@ -4,18 +4,18 @@ param(
 
 try {
     Set-Location -Path $WorkingDir
+
+    Write-Host "[$(Get-Date -Format o)] Starting npm run dev in $WorkingDir"
+
+    npm run dev
+
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "npm run dev failed with exit code $LASTEXITCODE"
+    }
 } catch {
-    Write-Error "Failed to change directory to $WorkingDir. $_"
-    exit 1
-}
-
-Write-Host "[$(Get-Date -Format o)] Starting npm run dev in $WorkingDir"
-
-$process = Start-Process -FilePath "npm" -ArgumentList "run", "dev" -NoNewWindow -Wait -PassThru
-
-if ($process.ExitCode -ne 0) {
-    Write-Error "npm run dev failed with exit code $($process.ExitCode)"
-    exit $process.ExitCode
+    Write-Error "Error: $_"
 }
 
 Write-Host "[$(Get-Date -Format o)] npm run dev completed successfully"
+
+Read-Host "Press Enter to close"

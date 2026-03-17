@@ -204,6 +204,7 @@ class TFVCMerge {
         await this.getLatestBranch(this.targetBranchPath, 'target');
         return {
             skipped: true,
+            hasChanges: true,
             targetRefreshed: true,
             message: 'TFVC merge skipped; target branch refreshed'
         };
@@ -211,23 +212,74 @@ class TFVCMerge {
 
     async executeMergeWorkflow() {
         await this.getLatestBranch(this.sourceBranchPath, 'source');
-        await this.mergeSourceIntoTarget();
 
-        const conflicts = await this.queryConflicts();
-        if (conflicts.count > 0) {
-            throw new Error('Merge conflicts detected. Resolve them in Visual Studio and rerun the deployment.');
+        // Check if there are unmerged changesets from source → target
+        const candidates = await this.checkMergeCandidates();
+        if (candidates.count === 0) {
+            logger.info('No unmerged changesets from source to target, nothing to do');
+            return {
+                skipped: false,
+                hasChanges: false,
+                changeset: null,
+                targetRefreshed: false,
+                message: 'No changes to merge from source into target branch'
+            };
         }
 
-        await this.bumpDescriptorVersion();
-        const changeset = await this.checkInChanges();
+        logger.info(`Found ${candidates.count} unmerged changeset(s) from source to target`, {
+            count: candidates.count,
+            changesets: candidates.changesets
+        });
+
+        // Step 1: Bump descriptor on SOURCE branch and check it in
+        await this.bumpDescriptorVersion(this.sourceLocalPath, this.sourceBranchPath);
+        const sourceChangeset = await this.checkInChanges(
+            this.sourceBranchPath,
+            `${this.modelName} ${this.lastVersionLabel || 'descriptor version bump'}`
+        );
+        logger.info('Descriptor version bumped on source branch', {
+            changeset: sourceChangeset,
+            version: this.lastVersionLabel
+        });
+
+        // Step 2: Merge source → target (includes the descriptor bump)
+        const mergeResult = await this.mergeSourceIntoTarget();
+
+        // Safety-net conflict check (mergeSourceIntoTarget already checks, but be thorough)
+        const conflicts = await this.queryConflicts();
+        if (conflicts.count > 0) {
+            throw new Error(
+                `${conflicts.count} conflict(s) detected after merge. Resolve them in Visual Studio and rerun the deployment.`
+            );
+        }
+
+        // Step 3: Check in merged changes on target (same version label as source)
+        const targetChangeset = await this.checkInChanges(
+            this.targetBranchPath,
+            `${this.modelName} ${this.lastVersionLabel || 'descriptor version bump'}`
+        );
         await this.getLatestBranch(this.targetBranchPath, 'target');
 
         return {
             skipped: false,
-            changeset,
+            hasChanges: true,
+            sourceChangeset,
+            targetChangeset,
             targetRefreshed: true,
-            message: `Source branch merged into target branch${changeset ? ` (changeset ${changeset})` : ''}`
+            message: `Source branch merged into target branch (source changeset ${sourceChangeset || 'N/A'}, target changeset ${targetChangeset || 'N/A'})`
         };
+    }
+
+    async checkMergeCandidates() {
+        logger.info('Checking for unmerged changesets', {
+            sourceBranch: this.sourceBranchPath,
+            targetBranch: this.targetBranchPath
+        });
+
+        return this.executeTfvcOperation('mergecandidates', {
+            sourcePath: this.sourceBranchPath,
+            targetPath: this.targetBranchPath
+        });
     }
 
     async getLatestBranch(branchPath, label) {
@@ -247,9 +299,16 @@ class TFVCMerge {
                 localPath: mapping.localPath
             });
 
-            await this.executeTfvcOperation('getlatest', {
+            const result = await this.executeTfvcOperation('getlatest', {
                 branchPath: mapping.serverPath
             });
+
+            if (result.numConflicts > 0) {
+                throw new Error(
+                    `${result.numConflicts} conflict(s) detected while getting latest on ${label} branch (${mapping.serverPath}). ` +
+                    'Resolve conflicts in Visual Studio and rerun the deployment.'
+                );
+            }
         }
     }
 
@@ -259,10 +318,60 @@ class TFVCMerge {
             targetBranch: this.targetBranchPath
         });
 
-        await this.executeTfvcOperation('merge', {
+        const result = await this.executeTfvcOperation('merge', {
             sourcePath: this.sourceBranchPath,
             targetPath: this.targetBranchPath
         });
+
+        if (result.numConflicts > 0) {
+            // Query the actual conflicts to inspect them
+            const conflictsResult = await this.queryConflicts();
+            const descriptorFileName = `${this.modelName}.xml`.toLowerCase();
+
+            const descriptorConflicts = [];
+            const nonDescriptorConflicts = [];
+
+            for (const conflict of (conflictsResult.conflicts || [])) {
+                const serverItem = (conflict.serverItem || '').toLowerCase();
+                if (serverItem.endsWith(`/descriptor/${descriptorFileName}`)) {
+                    descriptorConflicts.push(conflict);
+                } else {
+                    nonDescriptorConflicts.push(conflict);
+                }
+            }
+
+            // Non-descriptor conflicts must NEVER be auto-resolved
+            if (nonDescriptorConflicts.length > 0) {
+                const conflictPaths = nonDescriptorConflicts.map(c => c.serverItem).join(', ');
+                throw new Error(
+                    `${nonDescriptorConflicts.length} merge conflict(s) detected merging ${this.sourceBranchPath} into ${this.targetBranchPath}: ${conflictPaths}. ` +
+                    'Resolve conflicts in Visual Studio and rerun the deployment.'
+                );
+            }
+
+            // Only descriptor conflicts — auto-resolve with AcceptTheirs (take source version)
+            if (descriptorConflicts.length > 0) {
+                logger.info(`${descriptorConflicts.length} descriptor conflict(s) detected, auto-resolving with AcceptTheirs (source version)`);
+
+                const resolveResult = await this.executeTfvcOperation('resolveconflicts', {
+                    path: this.targetBranchPath,
+                    resolution: 'AcceptTheirs'
+                });
+
+                logger.info('Descriptor conflict auto-resolve result', {
+                    resolvedCount: resolveResult.resolvedCount,
+                    failedCount: resolveResult.failedCount
+                });
+
+                if (resolveResult.failedCount > 0) {
+                    throw new Error(
+                        `Failed to auto-resolve descriptor conflict. Resolve in Visual Studio and rerun the deployment.`
+                    );
+                }
+            }
+        }
+
+        return result;
     }
 
     async queryConflicts() {
@@ -271,8 +380,11 @@ class TFVCMerge {
         });
     }
 
-    async bumpDescriptorVersion() {
-        const descriptorPath = this.getDescriptorPath(this.targetLocalPath);
+    async bumpDescriptorVersion(localPath, branchPath) {
+        const resolvedLocalPath = localPath || this.targetLocalPath;
+        const resolvedBranchPath = branchPath || this.targetBranchPath;
+
+        const descriptorPath = this.getDescriptorPath(resolvedLocalPath, resolvedBranchPath);
         if (!descriptorPath) {
             throw new Error(`Descriptor file not found for model ${this.modelName}`);
         }
@@ -293,15 +405,16 @@ class TFVCMerge {
         this.lastVersionLabel = `${version.major}.0.${version.minor}.${version.build}.${nextRevision}`;
     }
 
-    async checkInChanges() {
-        const comment = (this.lastVersionLabel
+    async checkInChanges(branchPath, comment) {
+        const resolvedPath = branchPath || this.targetBranchPath;
+        const resolvedComment = (comment || (this.lastVersionLabel
             ? `${this.modelName} ${this.lastVersionLabel}`
-            : `Auto-deployment merge from ${this.sourceBranch} to ${this.targetBranch}`)
+            : `Auto-deployment merge from ${this.sourceBranch} to ${this.targetBranch}`))
             .replace(/"/g, '\'');
 
         const result = await this.executeTfvcOperation('checkin', {
-            path: this.targetBranchPath,
-            comment
+            path: resolvedPath,
+            comment: resolvedComment
         });
 
         return result.changeset || null;
@@ -329,8 +442,29 @@ class TFVCMerge {
         }
     }
 
-    getDescriptorPath(baseLocalPath) {
-        const descriptorPath = path.join(
+    getDescriptorPath(baseLocalPath, branchPath) {
+        // The descriptor's server path under the specified branch (defaults to target)
+        const resolvedBranchPath = branchPath || this.targetBranchPath;
+        const descriptorServerPath = `${resolvedBranchPath}/Main/Metadata/${this.modelName}/Descriptor/${this.modelName}.xml`;
+
+        // Check workspace mappings to resolve the local path
+        // (handles sub-mappings like $/project/branch/.../NMBPP → K:\...\NMBPP)
+        // Sort by longest server path first so the most specific mapping wins
+        const sorted = [...this.workspaceMappings].sort((a, b) => b.serverPath.length - a.serverPath.length);
+        for (const mapping of sorted) {
+            if (descriptorServerPath.toLowerCase().startsWith(mapping.serverPath.toLowerCase())) {
+                const relativePath = descriptorServerPath
+                    .substring(mapping.serverPath.length)
+                    .replace(/\//g, path.sep);
+                const candidate = path.join(mapping.localPath, relativePath);
+                if (fs.existsSync(candidate)) {
+                    return candidate;
+                }
+            }
+        }
+
+        // Fallback: standard path under the base local path
+        const fallbackPath = path.join(
             baseLocalPath,
             'Main',
             'Metadata',
@@ -339,7 +473,7 @@ class TFVCMerge {
             `${this.modelName}.xml`
         );
 
-        return fs.existsSync(descriptorPath) ? descriptorPath : null;
+        return fs.existsSync(fallbackPath) ? fallbackPath : null;
     }
 
     parseDescriptorVersion(xmlContent) {
