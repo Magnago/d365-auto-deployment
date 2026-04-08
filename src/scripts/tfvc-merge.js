@@ -266,6 +266,7 @@ class TFVCMerge {
             sourceChangeset,
             targetChangeset,
             targetRefreshed: true,
+            mergeCandidates: candidates.changesets || [],
             message: `Source branch merged into target branch (source changeset ${sourceChangeset || 'N/A'}, target changeset ${targetChangeset || 'N/A'})`
         };
     }
@@ -395,7 +396,7 @@ class TFVCMerge {
 
         const xml = fs.readFileSync(descriptorPath, 'utf8');
         const version = this.parseDescriptorVersion(xml);
-        const nextRevision = version.revision + 1;
+        const nextRevision = this.incrementRevision(version.revision);
         const updatedXml = xml.replace(
             new RegExp(`(<VersionRevision>)(\\s*)${version.revision}(\\s*)(</VersionRevision>)`, 'i'),
             `$1$2${nextRevision}$3$4`
@@ -491,6 +492,13 @@ class TFVCMerge {
             build: readTag('VersionBuild'),
             revision: readTag('VersionRevision')
         };
+    }
+
+    incrementRevision(revision) {
+        const revStr = String(revision).padStart(5, '0');
+        const prefix = parseInt(revStr.slice(0, 3), 10) + 1;
+        const suffix = revStr.slice(3);
+        return parseInt(`${prefix}${suffix}`, 10);
     }
 
     validateConfiguration() {

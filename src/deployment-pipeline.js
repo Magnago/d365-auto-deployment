@@ -8,6 +8,7 @@ const BuildOnly = require('./scripts/build-only');
 const SyncOnly = require('./scripts/sync-only');
 const ReportsOnly = require('./scripts/reports-only');
 const NotificationService = require('./core/notification-service');
+const JiraService = require('./core/jira-service');
 const D365Environment = require('./core/d365-environment');
 const logger = require('./core/logger');
 
@@ -21,6 +22,7 @@ class DeploymentPipeline {
         this.build = new BuildOnly();
         this.sync = new SyncOnly();
         this.reports = new ReportsOnly();
+        this.jira = new JiraService();
 
         this.modelName = process.env.D365_MODEL || 'YourD365Model';
         this.sourceBranch = process.env.SOURCE_BRANCH || 'Auto-Deployment-Dev';
@@ -32,6 +34,7 @@ class DeploymentPipeline {
         this.enableReportsStep = this.getEnvFlag('ENABLE_REPORTS_STEP', true);
         this.skipTfvcMergeOperations = this.getEnvFlag('SKIP_TFVC_MERGE_OPERATIONS', false);
         this.enableServiceControl = this.getEnvFlag('ENABLE_SERVICE_CONTROL', true);
+        this.enableJiraStep = this.getEnvFlag('ENABLE_JIRA_STEP', false);
 
         this.serviceStopCommands = this.getServiceCommands('SERVICE_STOP_COMMANDS', [
             'net stop W3SVC',
@@ -62,6 +65,7 @@ class DeploymentPipeline {
     async execute() {
         const originalSuppression = process.env.SUPPRESS_STEP_NOTIFICATIONS;
         const steps = [];
+        let mergeCandidates = [];
         this.startTime = Date.now();
         this.serviceStartRecorded = false;
         process.env.SUPPRESS_STEP_NOTIFICATIONS = 'true';
@@ -80,6 +84,7 @@ class DeploymentPipeline {
                     throw new Error(mergeResult.message);
                 }
 
+                mergeCandidates = mergeResult.details?.mergeCandidates || [];
                 const hasChanges = Boolean(mergeResult.details?.hasChanges);
                 if (!hasChanges && !this.skipTfvcMergeOperations) {
                     logger.info('No changes detected after merge, stopping pipeline');
@@ -103,6 +108,7 @@ class DeploymentPipeline {
             steps.push(await this.executeConfiguredStep('Database Synchronization', this.enableSyncStep, () => this.sync.execute(), 'ENABLE_SYNC_STEP=false'));
             steps.push(await this.executeConfiguredStep('Deploy All Reports', this.enableReportsStep, () => this.reports.execute(), 'ENABLE_REPORTS_STEP=false'));
             steps.push(await this.executeServiceStartStep(true));
+            steps.push(await this.executeConfiguredStep('Jira Ticket Transitions', this.enableJiraStep, () => this.jira.execute(mergeCandidates), 'ENABLE_JIRA_STEP=false'));
 
             const results = this.buildResults(steps);
             await this.notifications.sendNotification('success', this.notificationData({
@@ -323,6 +329,62 @@ class DeploymentPipeline {
                     .map(value => value.toString().trim())
                     .filter(Boolean)
                     .join(' | ');
+
+                // Windows returned "service is starting or stopping" — poll until settled
+                if (action === 'stop' && /starting or stopping/i.test(output)) {
+                    const serviceName = this.extractServiceName(originalCommand);
+                    if (serviceName) {
+                        logger.warn('Service is in a pending state, polling until stopped', { command, serviceName });
+                        const stopped = await this.waitForServiceStopped(serviceName, command);
+                        if (!stopped) {
+                            const isBatchService = /DynamicsAxBatch/i.test(serviceName);
+                            const warningMsg = `Service "${serviceName}" did not stop within the poll timeout and was skipped. Deployment is continuing but the batch service may still be running.`;
+                            logger.warn(warningMsg, { serviceName, command });
+                            if (isBatchService) {
+                                await this.notifications.sendNotification('warning', {
+                                    ...this.notificationData(),
+                                    warning: warningMsg
+                                });
+                                executed.push(command);
+                                continue;
+                            }
+                            throw new Error(`Stop command failed (${command}): service did not reach stopped state within the poll timeout`);
+                        }
+                        executed.push(command);
+                        continue;
+                    }
+                }
+
+                // Windows error 1064 (exception in service) or START_PENDING — retry with polling
+                if (action === 'start' && /1064|exception occurred in the service/i.test(output)) {
+                    const serviceName = this.extractServiceName(originalCommand);
+                    if (serviceName) {
+                        logger.warn('Service start raised exception (error 1064), polling to see if it recovers', { command, serviceName, output });
+                        const running = await this.waitForServiceRunning(serviceName);
+                        if (running) {
+                            executed.push(command);
+                            continue;
+                        }
+                        // Retry the start command once after a short delay
+                        logger.warn('Service not running after error 1064, retrying start command', { command, serviceName });
+                        await new Promise(resolve => setTimeout(resolve, 10000));
+                        try {
+                            const { stdout, stderr } = await execAsync(command, {
+                                windowsHide: true,
+                                timeout: this.serviceCommandTimeout
+                            });
+                            if (stdout?.trim()) logger.debug('Service retry stdout', { command, output: stdout.trim() });
+                            if (stderr?.trim()) logger.debug('Service retry stderr', { command, output: stderr.trim() });
+                            executed.push(command);
+                            continue;
+                        } catch (retryError) {
+                            const retryOutput = [retryError.stderr, retryError.stdout, retryError.message]
+                                .filter(Boolean).map(v => v.toString().trim()).filter(Boolean).join(' | ');
+                            throw new Error(`Start command failed after retry (${command}): ${retryOutput || 'Unknown error'}`);
+                        }
+                    }
+                }
+
                 const nonFatal = this.getNonFatalServiceError(action, output);
                 if (!nonFatal) {
                     throw new Error(`${action === 'stop' ? 'Stop' : 'Start'} command failed (${command}): ${output || 'Unknown error'}`);
@@ -341,6 +403,84 @@ class DeploymentPipeline {
             message: `${action === 'stop' ? 'Stopped' : 'Started'} ${executed.length} service(s)`,
             details: { commandsExecuted: executed }
         };
+    }
+
+    extractServiceName(command) {
+        // Extract service name from "net stop <ServiceName>" or "net start <ServiceName>"
+        const match = (command || '').trim().match(/^net\s+(?:stop|start)\s+(\S+)/i);
+        return match ? match[1] : null;
+    }
+
+    async waitForServiceStopped(serviceName, originalCommand) {
+        const pollIntervalMs = 5000;           // check every 5 s
+        const maxWaitMs = 10 * 60 * 1000;     // give up after 10 min
+        const deadline = Date.now() + maxWaitMs;
+
+        while (Date.now() < deadline) {
+            await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+
+            let state = null;
+            try {
+                const { stdout } = await execAsync(`sc query "${serviceName}"`, { windowsHide: true, timeout: 15000 });
+                const match = (stdout || '').match(/STATE\s*:\s*\d+\s+(\w+(?:\s+\w+)*)/i);
+                state = match ? match[1].trim().toUpperCase() : null;
+            } catch {
+                // sc query itself failed — service may already be gone/stopped
+                state = 'STOPPED';
+            }
+
+            logger.debug('Polling service state', { serviceName, state });
+
+            if (!state || state === 'STOPPED') {
+                logger.info('Service reached stopped state', { serviceName });
+                return true;
+            }
+
+            if (state === 'RUNNING' || state === 'START_PENDING') {
+                // Unexpected: service came back up or never stopped — treat as error
+                throw new Error(`Stop command failed (${originalCommand}): service returned to state "${state}" while waiting for it to stop`);
+            }
+
+            // STOP_PENDING — keep polling
+        }
+
+        // Timed out — let the caller decide whether this is fatal
+        return false;
+    }
+
+    async waitForServiceRunning(serviceName) {
+        const pollIntervalMs = 5000;           // check every 5 s
+        const maxWaitMs = 2 * 60 * 1000;      // give up after 2 min
+        const deadline = Date.now() + maxWaitMs;
+
+        while (Date.now() < deadline) {
+            await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+
+            let state = null;
+            try {
+                const { stdout } = await execAsync(`sc query "${serviceName}"`, { windowsHide: true, timeout: 15000 });
+                const match = (stdout || '').match(/STATE\s*:\s*\d+\s+(\w+(?:\s+\w+)*)/i);
+                state = match ? match[1].trim().toUpperCase() : null;
+            } catch {
+                state = null;
+            }
+
+            logger.debug('Polling service state', { serviceName, state });
+
+            if (state === 'RUNNING') {
+                logger.info('Service reached running state', { serviceName });
+                return true;
+            }
+
+            if (!state || state === 'STOPPED') {
+                // Service stopped — failed to start, stop polling so caller can retry
+                return false;
+            }
+
+            // START_PENDING or other transient state — keep polling
+        }
+
+        return false;
     }
 
     prepareServiceCommand(command, action) {

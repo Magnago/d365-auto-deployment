@@ -17,6 +17,12 @@
       "channels": ["teams"],
       "includeDetails": true,
       "includeLogs": true
+    },
+    "onWarning": {
+      "enabled": true,
+      "channels": ["teams"],
+      "includeDetails": true,
+      "includeLogs": false
     }
   }
 }

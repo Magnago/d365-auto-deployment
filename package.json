@@ -10,6 +10,7 @@
     "build": "node src/scripts/build-only.js",
     "sync": "node src/scripts/sync-only.js",
     "reports": "node src/scripts/reports-only.js",
+    "jira": "node src/scripts/jira-only.js",
     "build:exe": "pkg src/deployment-pipeline.js --targets node18-win-x64 --output dist/d365-auto-deployment.exe",
     "test": "jest --verbose"
   },

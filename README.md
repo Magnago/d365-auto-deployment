@@ -10,9 +10,14 @@ A fully automated deployment pipeline for Dynamics 365 Finance & Operations that
 - **SSRS Report Deployment** - Automated report deployment using D365's built-in PowerShell script
 - **Service Control** - Automatic stop/start of IIS, SSRS, Batch, DMF, and MR services around deployments
 - **Cross-Environment Support** - Works with local (C: drive) and cloud (K: drive) D365 environments
-- **Teams Notifications** - Deployment start, success, and failure notifications via webhook
+- **Jira Integration** - Automatic ticket transitions, tester assignment, and deployment comments with changeset details
+- **Teams Notifications** - Deployment start, success, failure, and warning notifications via webhook
+- **Merge Candidate Detection** - Skips build/sync/reports when no unmerged changesets exist between source and target branches
+- **Service Pending-State Handling** - Polls Windows services stuck in starting/stopping states with configurable timeouts
+- **Scheduled Task Support** - Includes a batch script to register the pipeline as a Windows Scheduled Task
 - **Comprehensive Logging** - Winston-based structured logging with file rotation
 - **Standalone Executable** - Can be packaged as a Windows `.exe` for distribution without Node.js
+- **Test Suite** - Jest-based tests covering service control, pending-state polling, and retry logic
 
 ## Prerequisites
 
@@ -122,6 +127,21 @@ TEAMS_WEBHOOK_URL=https://outlook.office.com/webhook/your-webhook-url
 NOTIFICATION_ENABLED=true
 ```
 
+**Jira Integration:**
+
+```env
+ENABLE_JIRA_STEP=false                              # Enable Jira ticket transitions after deployment
+JIRA_URL=https://your-org.atlassian.net
+JIRA_EMAIL=automation@example.com
+JIRA_API_TOKEN=your-jira-api-token
+JIRA_PROJECT=PROJ
+JIRA_PROMOTER=promoter@example.com                   # Assignee filter for tickets to transition
+JIRA_FROM_STATUS=Ready for Test
+JIRA_TO_STATUS=In Testing
+JIRA_DEFAULT_TESTER=tester@example.com
+JIRA_TESTERS=tester1@example.com,tester2@example.com # Comma-separated; tester with most comments is auto-assigned
+```
+
 **Timeouts (milliseconds):**
 
 ```env
@@ -174,7 +194,8 @@ Configure notification behavior in `config/deployment-config.json`:
   "notifications": {
     "onStart": { "enabled": true, "channels": ["teams"], "includeDetails": true },
     "onSuccess": { "enabled": true, "channels": ["teams"], "includeDetails": true },
-    "onFailure": { "enabled": true, "channels": ["teams"], "includeDetails": true, "includeLogs": true }
+    "onFailure": { "enabled": true, "channels": ["teams"], "includeDetails": true, "includeLogs": true },
+    "onWarning": { "enabled": true, "channels": ["teams"], "includeDetails": true }
   }
 }
 ```
@@ -193,9 +214,12 @@ The pipeline executes these steps in sequence:
 6. **Database Sync** - Run `SyncEngine.exe` with `syncmode=fullall` against AxDB *(if enabled)*
 7. **Deploy Reports** - Execute `DeployAllReportsToSSRS.ps1` *(if enabled)*
 8. **Start Services** - Run `SERVICE_START_COMMANDS` (always attempted, even on failure)
-9. **Completion Notification** - Post success or failure to Teams with execution time and error details
+9. **Jira Ticket Transitions** *(if enabled)* - Transition matching tickets, add deployment comments with changeset details, and auto-assign testers
+10. **Completion Notification** - Post success or failure to Teams with execution time and error details
 
-Each step can be independently enabled/disabled via `ENABLE_*_STEP` environment variables. On failure, the pipeline attempts to restart services before sending the failure notification.
+Each step can be independently enabled/disabled via `ENABLE_*_STEP` environment variables. The pipeline automatically detects when there are no unmerged changesets between source and target branches and short-circuits (skips build/sync/reports) to avoid unnecessary work. On failure, the pipeline attempts to restart services before sending the failure notification.
+
+If a Windows service is stuck in a "starting or stopping" state, the pipeline polls `sc query` until the service settles (up to 10 minutes for stop, 2 minutes for start). The DynamicsAxBatch service is treated as non-fatal on timeout — the pipeline sends a Teams warning and continues.
 
 ## NPM Scripts
 
@@ -207,7 +231,9 @@ Each step can be independently enabled/disabled via `ENABLE_*_STEP` environment 
 | `npm run build` | Build only | Compile the D365 model |
 | `npm run sync` | Sync only | Run database synchronization |
 | `npm run reports` | Reports only | Deploy SSRS reports |
+| `npm run jira` | Jira only | Run Jira ticket transitions standalone |
 | `npm run build:exe` | Package | Build standalone Windows executable |
+| `npm run test` | Tests | Run the Jest test suite |
 
 ## Project Structure
 
@@ -217,6 +243,7 @@ src/
   core/
     logger.js                     # Winston-based structured logging
     notification-service.js       # Teams webhook notifications
+    jira-service.js               # Jira Cloud REST API integration
     powershell-runner.js          # PowerShell process execution wrapper
     d365-environment.js           # Environment detection (local/cloud)
   modules/
@@ -230,12 +257,16 @@ src/
     build-only.js                 # Standalone build entry point
     sync-only.js                  # Standalone sync entry point
     reports-only.js               # Standalone reports entry point
+    jira-only.js                  # Standalone Jira transition entry point
+tests/
+  service-pending-state.test.js   # Service control and retry logic tests
 config/
   environments.json               # D365 path configuration per environment
   deployment-config.json          # Notification channel settings
 setup-tfs-libs.ps1                # Copies TFS assemblies from Visual Studio
 run-pipeline.ps1                  # PowerShell wrapper to launch the pipeline
 .env.example                      # Environment variable template
+create-scheduled-task.bat         # Register pipeline as a Windows Scheduled Task
 ```
 
 ## Building a Standalone Executable
@@ -245,6 +276,16 @@ npm run build:exe
 ```
 
 This produces `dist/d365-auto-deployment.exe`. Copy the executable along with your `.env` file and `config/` directory to any Windows server with D365 prerequisites - no Node.js installation required.
+
+## Scheduling Deployments
+
+Run `create-scheduled-task.bat` as Administrator to register the pipeline as a daily Windows Scheduled Task (default: 8:00 PM):
+
+```cmd
+create-scheduled-task.bat
+```
+
+This creates a task named "D365 Auto Deployment" that runs `run-pipeline.ps1` daily at the configured time.
 
 ## Troubleshooting
 

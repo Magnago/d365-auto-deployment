@@ -71,6 +71,7 @@ class NotificationService {
             if (data.sourceBranch) facts.push({ name: 'Source Branch', value: data.sourceBranch });
             if (data.targetBranch) facts.push({ name: 'Target Branch', value: data.targetBranch });
             if (data.failedStep) facts.push({ name: 'Failed Step', value: data.failedStep });
+            if (data.warning) facts.push({ name: 'Warning', value: this.trim(data.warning, 300) });
             if (data.error) facts.push({ name: 'Error', value: this.trim(data.error, 300) });
             if (data.executionTime) facts.push({ name: 'Execution Time', value: this.formatDuration(data.executionTime) });
         }
@@ -95,6 +96,7 @@ class NotificationService {
         if (type === 'start') return 'Deployment Started';
         if (type === 'success') return 'Deployment Succeeded';
         if (type === 'failure') return 'Deployment Failed';
+        if (type === 'warning') return 'Deployment Warning';
         return 'Deployment Update';
     }
 
@@ -102,6 +104,7 @@ class NotificationService {
         if (type === 'start') return 'Deployment Started';
         if (type === 'success') return 'Deployment Succeeded';
         if (type === 'failure') return 'Deployment Failed';
+        if (type === 'warning') return 'Deployment Warning';
         return 'Deployment Update';
     }
 
@@ -109,6 +112,7 @@ class NotificationService {
         if (type === 'start') return '0078D4';
         if (type === 'success') return '107C10';
         if (type === 'failure') return 'D13438';
+        if (type === 'warning') return 'FFC300';
         return '808080';
     }
 
