@@ -146,8 +146,8 @@ JIRA_TESTERS=tester1@example.com,tester2@example.com # Comma-separated; tester w
 
 ```env
 BUILD_TIMEOUT=3600000     # 1 hour
-SYNC_TIMEOUT=1800000      # 30 minutes
-REPORTS_TIMEOUT=900000    # 15 minutes
+SYNC_TIMEOUT=3600000      # 1 hour
+REPORTS_TIMEOUT=1200000   # 20 minutes
 ```
 
 **Logging:**
