@@ -92,7 +92,6 @@ class D365Build {
             `-output="${moduleBinPath}"`,
             `-log="${buildLogPath}"`,
             `-xmllog="${buildXmlLogPath}"`,
-			'-label',
             '-verbose'
         ].join(' ');
     }
