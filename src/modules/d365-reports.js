@@ -12,7 +12,7 @@ class D365Reports {
     constructor() {
         this.environment = new D365Environment();
         this.psRunner = new PowerShellRunner();
-        this.defaultTimeout = 15 * 60 * 1000;
+        this.defaultTimeout = 20 * 60 * 1000;
     }
 
     async deployAllReports(options = {}) {

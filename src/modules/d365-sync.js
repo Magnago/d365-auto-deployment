@@ -8,7 +8,7 @@ class D365Sync {
     constructor() {
         this.environment = new D365Environment();
         this.psRunner = new PowerShellRunner();
-        this.defaultTimeout = 30 * 60 * 1000;
+        this.defaultTimeout = 60 * 60 * 1000;
     }
 
     async performFullSync(options = {}) {
