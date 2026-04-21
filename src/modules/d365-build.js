@@ -103,18 +103,16 @@ class D365Build {
         const labelcPath = path.join(paths.binPath, 'labelc.exe');
         const metadataPath = paths.packages;
         const modulePath = path.join(paths.packages, model);
-        const resourcesPath = path.join(modulePath, 'Resources');
         const labelLogPath = path.join(modulePath, `${model}.BuildLabelsResult.log`);
-        const labelXmlLogPath = path.join(modulePath, `${model}.BuildLabelsResult.xml`);
+        const labelErrLogPath = path.join(modulePath, `${model}.BuildLabelsResult.err`);
 
         return [
             `& "${labelcPath}"`,
             `-metadata="${metadataPath}"`,
             `-modelmodule="${model}"`,
-            `-output="${resourcesPath}"`,
+            `-output="${modulePath}"`,
             `-outlog="${labelLogPath}"`,
-            `-xmllog="${labelXmlLogPath}"`,
-            '-verbose'
+            `-errlog="${labelErrLogPath}"`
         ].join(' ');
     }
 

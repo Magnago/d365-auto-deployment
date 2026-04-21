@@ -64,7 +64,10 @@ describe('Successful build', () => {
         const labelCommand = mockPsExecute.mock.calls[0][0];
         expect(labelCommand).toContain('labelc.exe');
         expect(labelCommand).toContain('-modelmodule="TestModel"');
-        expect(labelCommand).toContain('Resources');
+        expect(labelCommand).toContain('-metadata="K:\\AosService\\PackagesLocalDirectory"');
+        expect(labelCommand).toContain('-output="K:\\AosService\\PackagesLocalDirectory\\TestModel"');
+        expect(labelCommand).not.toContain('-xmllog');
+        expect(labelCommand).not.toContain('-verbose');
 
         const xppcCommand = mockPsExecute.mock.calls[1][0];
         expect(xppcCommand).toContain('xppc.exe');
