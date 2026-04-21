@@ -22,31 +22,26 @@ class D365Build {
             const paths = this.environment.getPaths(environmentType);
             await this.validateEnvironment(paths, model);
 
-            let labelResult = null;
-            if (await this.hasLabelResources(paths, model)) {
-                const labelCommand = this.prepareLabelCommand(paths, model);
-                logger.info('Starting D365 label build', {
-                    environmentType,
-                    model,
-                    packagesPath: paths.packages,
-                    binPath: paths.binPath,
-                    timeout
-                });
+            const labelCommand = this.prepareLabelCommand(paths, model);
+            logger.info('Starting D365 label build', {
+                environmentType,
+                model,
+                packagesPath: paths.packages,
+                binPath: paths.binPath,
+                timeout
+            });
 
-                labelResult = await this.psRunner.execute(labelCommand, {
-                    timeout,
-                    cwd: paths.binPath,
-                    logOutput: true,
-                    deploymentLogDir
-                });
+            const labelResult = await this.psRunner.execute(labelCommand, {
+                timeout,
+                cwd: paths.binPath,
+                logOutput: true,
+                deploymentLogDir
+            });
 
-                logger.info('D365 label build completed', {
-                    model,
-                    executionTime: labelResult.executionTime
-                });
-            } else {
-                logger.info('Skipping label build — no LabelResources folder found', { model });
-            }
+            logger.info('D365 label build completed', {
+                model,
+                executionTime: labelResult.executionTime
+            });
 
             const command = this.prepareBuildCommand(paths, model);
             logger.info('Starting D365 build', {
@@ -68,7 +63,7 @@ class D365Build {
                 model,
                 environmentType,
                 executionTime: result.executionTime,
-                labelExecutionTime: labelResult ? labelResult.executionTime : null
+                labelExecutionTime: labelResult.executionTime
             });
 
             return {
@@ -76,9 +71,10 @@ class D365Build {
                 model,
                 environmentType,
                 paths,
-                labelBuild: labelResult
-                    ? { success: labelResult.success, executionTime: labelResult.executionTime }
-                    : { skipped: true }
+                labelBuild: {
+                    success: labelResult.success,
+                    executionTime: labelResult.executionTime
+                }
             };
         } catch (error) {
             logger.failStep('D365 Full Build', error, { model });
@@ -101,10 +97,6 @@ class D365Build {
                 throw new Error(`Build prerequisite not found: ${requiredPath}`);
             }
         }
-    }
-
-    async hasLabelResources(paths, model) {
-        return fs.pathExists(path.join(paths.packages, model, 'LabelResources'));
     }
 
     prepareLabelCommand(paths, model) {

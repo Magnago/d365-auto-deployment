@@ -72,21 +72,6 @@ describe('Successful build', () => {
         expect(xppcCommand).toContain('-verbose');
     });
 
-    test('skips label build when LabelResources folder is missing', async () => {
-        mockPathExists.mockImplementation((p) => {
-            return Promise.resolve(!p.endsWith('LabelResources'));
-        });
-        mockPsExecute.mockResolvedValue({
-            code: 0, success: true, stdout: 'Build succeeded', stderr: '', executionTime: 5000,
-        });
-
-        const build = new D365Build();
-        const result = await build.buildModel('TestModel');
-
-        expect(result.labelBuild).toEqual({ skipped: true });
-        expect(mockPsExecute).toHaveBeenCalledTimes(1);
-        expect(mockPsExecute.mock.calls[0][0]).toContain('xppc.exe');
-    });
 });
 
 // ============================================================================
