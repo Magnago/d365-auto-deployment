@@ -46,7 +46,7 @@ beforeEach(() => {
 // 1. Successful build
 // ============================================================================
 describe('Successful build', () => {
-    test('calls xppc.exe with correct arguments', async () => {
+    test('calls labelc.exe then xppc.exe with correct arguments', async () => {
         mockPsExecute.mockResolvedValue({
             code: 0, success: true, stdout: 'Build succeeded', stderr: '', executionTime: 5000,
         });
@@ -57,11 +57,35 @@ describe('Successful build', () => {
         expect(result.success).toBe(true);
         expect(result.model).toBe('TestModel');
         expect(result.environmentType).toBe('cloud');
+        expect(result.labelBuild).toEqual({ success: true, executionTime: 5000 });
 
-        const command = mockPsExecute.mock.calls[0][0];
-        expect(command).toContain('xppc.exe');
-        expect(command).toContain('TestModel');
-        expect(command).toContain('-verbose');
+        expect(mockPsExecute).toHaveBeenCalledTimes(2);
+
+        const labelCommand = mockPsExecute.mock.calls[0][0];
+        expect(labelCommand).toContain('labelc.exe');
+        expect(labelCommand).toContain('-modelmodule="TestModel"');
+        expect(labelCommand).toContain('Resources');
+
+        const xppcCommand = mockPsExecute.mock.calls[1][0];
+        expect(xppcCommand).toContain('xppc.exe');
+        expect(xppcCommand).toContain('TestModel');
+        expect(xppcCommand).toContain('-verbose');
+    });
+
+    test('skips label build when LabelResources folder is missing', async () => {
+        mockPathExists.mockImplementation((p) => {
+            return Promise.resolve(!p.endsWith('LabelResources'));
+        });
+        mockPsExecute.mockResolvedValue({
+            code: 0, success: true, stdout: 'Build succeeded', stderr: '', executionTime: 5000,
+        });
+
+        const build = new D365Build();
+        const result = await build.buildModel('TestModel');
+
+        expect(result.labelBuild).toEqual({ skipped: true });
+        expect(mockPsExecute).toHaveBeenCalledTimes(1);
+        expect(mockPsExecute.mock.calls[0][0]).toContain('xppc.exe');
     });
 });
 
@@ -90,6 +114,15 @@ describe('Missing prerequisites', () => {
 
         const build = new D365Build();
         await expect(build.buildModel('TestModel')).rejects.toThrow(/Build prerequisite not found.*xppc\.exe/);
+    });
+
+    test('throws when labelc.exe does not exist', async () => {
+        mockPathExists.mockImplementation((p) => {
+            return Promise.resolve(!p.endsWith('labelc.exe'));
+        });
+
+        const build = new D365Build();
+        await expect(build.buildModel('TestModel')).rejects.toThrow(/Build prerequisite not found.*labelc\.exe/);
     });
 
     test('throws when model directory does not exist', async () => {
