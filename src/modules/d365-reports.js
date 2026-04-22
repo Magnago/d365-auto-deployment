@@ -13,11 +13,13 @@ class D365Reports {
         this.environment = new D365Environment();
         this.psRunner = new PowerShellRunner();
         this.defaultTimeout = 20 * 60 * 1000;
+        this.defaultBuildTimeout = 30 * 60 * 1000;
     }
 
     async deployAllReports(options = {}) {
         const moduleName = options.module || process.env.D365_MODEL || 'YourD365Model';
         const timeout = Number(process.env.REPORTS_TIMEOUT) || options.timeout || this.defaultTimeout;
+        const buildTimeout = Number(process.env.REPORT_BUILD_TIMEOUT) || options.buildTimeout || this.defaultBuildTimeout;
         const deploymentLogDir = options.deploymentLogDir || null;
 
         logger.startStep('D365 Reports Deployment', { module: moduleName });
@@ -28,12 +30,23 @@ class D365Reports {
             await this.validateEnvironment(paths, moduleName);
             await this.ensureDeploymentRegistry(paths);
 
+            logger.info('Building SSRS reports for model before deployment', {
+                environmentType,
+                module: moduleName,
+                packagesPath: paths.packages
+            });
+            const buildResult = await this.buildReports(paths, moduleName, {
+                timeout: buildTimeout,
+                deploymentLogDir
+            });
+
             const command = `& "${paths.reportsScriptPath}" -Module "${moduleName}" -PackageInstallLocation "${paths.packages}"`;
             logger.info('Starting D365 reports deployment', {
                 environmentType,
                 module: moduleName,
                 packagesPath: paths.packages,
                 scriptPath: paths.reportsScriptPath,
+                buildTimeout,
                 timeout
             });
 
@@ -58,6 +71,7 @@ class D365Reports {
                 ...result,
                 module: moduleName,
                 environmentType,
+                build: buildResult,
                 deploymentStats
             };
         } catch (error) {
@@ -69,8 +83,11 @@ class D365Reports {
     async validateEnvironment(paths, moduleName) {
         const requiredPaths = [
             paths.packages,
+            paths.binPath,
             paths.reportsScriptPath,
-            path.join(paths.packages, moduleName)
+            path.join(paths.binPath, 'reportsc.exe'),
+            path.join(paths.packages, moduleName),
+            path.join(paths.packages, moduleName, 'Reports')
         ];
 
         for (const requiredPath of requiredPaths) {
@@ -109,6 +126,54 @@ class D365Reports {
         }
     }
 
+    async buildReports(paths, moduleName, options = {}) {
+        const timeout = options.timeout || this.defaultBuildTimeout;
+        const deploymentLogDir = options.deploymentLogDir || null;
+        const command = this.prepareBuildCommand(paths, moduleName);
+
+        logger.info('Starting D365 report build', {
+            module: moduleName,
+            packagesPath: paths.packages,
+            binPath: paths.binPath,
+            timeout
+        });
+
+        const result = await this.psRunner.execute(command, {
+            timeout,
+            cwd: paths.binPath,
+            logOutput: true,
+            deploymentLogDir,
+            nonInteractive: true
+        });
+
+        logger.info('D365 report build completed', {
+            module: moduleName,
+            executionTime: result.executionTime
+        });
+
+        return {
+            success: result.success,
+            executionTime: result.executionTime
+        };
+    }
+
+    prepareBuildCommand(paths, moduleName) {
+        const reportscPath = path.join(paths.binPath, 'reportsc.exe');
+        const metadataPath = paths.packages;
+        const outputPath = path.join(paths.packages, moduleName, 'Reports');
+        const reportLogPath = path.join(outputPath, `${moduleName}.BuildReportsResult.log`);
+        const reportXmlLogPath = path.join(outputPath, `${moduleName}.BuildReportsResult.xml`);
+
+        return [
+            `& "${reportscPath}"`,
+            `-metadata="${metadataPath}"`,
+            `-modelmodule="${moduleName}"`,
+            `-output="${outputPath}"`,
+            `-log="${reportLogPath}"`,
+            `-xmllog="${reportXmlLogPath}"`
+        ].join(' ');
+    }
+
     parseDeploymentOutput(output = '') {
         const stats = {
             totalReports: 0,
@@ -120,7 +185,24 @@ class D365Reports {
         };
 
         for (const line of output.split(/\r?\n/)) {
+            const trimmedLine = line.trim();
             const normalized = line.toLowerCase();
+            const statusMatch = trimmedLine.match(/^(.+?),\s+.+?\s+(Success|Warning|Failure)$/i);
+            if (statusMatch) {
+                stats.totalReports += 1;
+                const status = statusMatch[2].toLowerCase();
+                if (status === 'success') {
+                    stats.deployedReports += 1;
+                } else if (status === 'warning') {
+                    stats.deployedReports += 1;
+                    stats.warnings += 1;
+                } else if (status === 'failure') {
+                    stats.failedReports += 1;
+                    stats.errors += 1;
+                }
+                continue;
+            }
+
             if (normalized.includes('deployed') || normalized.includes('published')) {
                 stats.deployedReports += 1;
             }

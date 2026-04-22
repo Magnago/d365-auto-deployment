@@ -7,7 +7,7 @@ A fully automated deployment pipeline for Dynamics 365 Finance & Operations that
 - **TFVC Branch Operations** - Automated merge from source to target branch with conflict detection and version bumping
 - **X++ Compilation** - Full model build using `xppc.exe`
 - **Database Synchronization** - Schema sync via `SyncEngine.exe` against AxDB
-- **SSRS Report Deployment** - Automated report deployment using D365's built-in PowerShell script
+- **SSRS Report Build + Deployment** - Automated report generation with `reportsc.exe` followed by deployment using D365's built-in PowerShell script
 - **Service Control** - Automatic stop/start of IIS, SSRS, Batch, DMF, and MR services around deployments
 - **Cross-Environment Support** - Works with local (C: drive) and cloud (K: drive) D365 environments
 - **Jira Integration** - Automatic ticket transitions, tester assignment, and deployment comments with changeset details
@@ -212,10 +212,11 @@ The pipeline executes these steps in sequence:
    - **Skip merge mode** (`SKIP_TFVC_MERGE_OPERATIONS=true`): Get latest on target branch only
 5. **Build** - Compile the D365 model using `xppc.exe` *(if enabled)*
 6. **Database Sync** - Run `SyncEngine.exe` with `syncmode=fullall` against AxDB *(if enabled)*
-7. **Deploy Reports** - Execute `DeployAllReportsToSSRS.ps1` *(if enabled)*
-8. **Start Services** - Run `SERVICE_START_COMMANDS` (always attempted, even on failure)
-9. **Jira Ticket Transitions** *(if enabled)* - Transition matching tickets, add deployment comments with changeset details, and auto-assign testers
-10. **Completion Notification** - Post success or failure to Teams with execution time and error details
+7. **Build Reports** - Generate fresh RDL files for the selected model with `reportsc.exe` *(if enabled via reports step)*
+8. **Deploy Reports** - Execute `DeployAllReportsToSSRS.ps1` for the selected model *(if enabled)*
+9. **Start Services** - Run `SERVICE_START_COMMANDS` (always attempted, even on failure)
+10. **Jira Ticket Transitions** *(if enabled)* - Transition matching tickets, add deployment comments with changeset details, and auto-assign testers
+11. **Completion Notification** - Post success or failure to Teams with execution time and error details
 
 Each step can be independently enabled/disabled via `ENABLE_*_STEP` environment variables. The pipeline automatically detects when there are no unmerged changesets between source and target branches and short-circuits (skips build/sync/reports) to avoid unnecessary work. On failure, the pipeline attempts to restart services before sending the failure notification.
 
@@ -312,8 +313,10 @@ Run `npm run tfvc:auth` to diagnose authentication issues. Common problems:
 ### Report Deployment
 
 - Ensure SSRS is running and accessible
+- Verify `reportsc.exe` exists in `PackagesLocalDirectory\bin`
 - Verify `DeployAllReportsToSSRS.ps1` exists at the expected path
 - Check that registry values for BinDir/InstallDir are correct
+- Confirm the model's `Reports\*.rdl` files were regenerated recently before deployment
 
 ### Log Locations
 
