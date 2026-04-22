@@ -17,5 +17,3 @@ try {
 }
 
 Write-Host "[$(Get-Date -Format o)] npm run dev completed successfully"
-
-Read-Host "Press Enter to close"
