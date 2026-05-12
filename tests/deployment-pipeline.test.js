@@ -537,6 +537,49 @@ describe('Service control', () => {
         expect(pipeline.getNonFatalServiceError('start', 'The service has already been started.')).toBe('already running');
         expect(pipeline.getNonFatalServiceError('stop', 'Access denied')).toBeNull();
     });
+
+    test('Start Services failure does NOT abort pipeline — warning is sent and Jira step still runs', async () => {
+        setEnv({ ENABLE_SERVICE_CONTROL: 'true' });
+
+        // Stop commands succeed; start command for MR2012 fails fatally
+        exec.mockImplementation((cmd, opts, cb) => {
+            if (typeof opts === 'function') { cb = opts; }
+            if (/net start MR2012ProcessService/i.test(cmd)) {
+                const err = new Error('Start command failed');
+                err.stderr = 'The Management Reporter 2012 Process Service service could not be started.';
+                err.stdout = '';
+                return cb(err);
+            }
+            cb(null, { stdout: '', stderr: '' });
+        });
+
+        mockTfvcExecute.mockResolvedValue({
+            success: true, message: 'ok',
+            details: { hasChanges: true },
+        });
+        mockBuildExecute.mockResolvedValue({ success: true });
+        mockSyncExecute.mockResolvedValue({ success: true });
+        mockReportsExecute.mockResolvedValue({ success: true });
+
+        const pipeline = new DeploymentPipeline();
+        const results = await pipeline.execute();
+
+        // Pipeline did not throw and reached the Jira step (skipped because the flag defaults to false)
+        const stepNames = results.steps.map(s => s.name);
+        expect(stepNames).toContain('Start Services');
+        expect(stepNames).toContain('Jira Ticket Transitions');
+
+        const startStep = results.steps.find(s => s.name === 'Start Services');
+        expect(startStep.success).toBe(false);
+
+        const notifTypes = mockSendNotification.mock.calls.map(c => c[0]);
+        expect(notifTypes).toContain('warning');
+        expect(notifTypes).toContain('success');
+        expect(notifTypes).not.toContain('failure');
+
+        const warningCall = mockSendNotification.mock.calls.find(c => c[0] === 'warning');
+        expect(warningCall[1].warning).toMatch(/Start Services step failed \(non-blocking\)/i);
+    });
 });
 
 // ============================================================================
