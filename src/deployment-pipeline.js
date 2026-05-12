@@ -107,7 +107,20 @@ class DeploymentPipeline {
             steps.push(await this.executeConfiguredStep('Full Build', this.enableBuildStep, () => this.build.execute(), 'ENABLE_BUILD_STEP=false'));
             steps.push(await this.executeConfiguredStep('Database Synchronization', this.enableSyncStep, () => this.sync.execute(), 'ENABLE_SYNC_STEP=false'));
             steps.push(await this.executeConfiguredStep('Deploy All Reports', this.enableReportsStep, () => this.reports.execute(), 'ENABLE_REPORTS_STEP=false'));
-            steps.push(await this.executeServiceStartStep(true));
+
+            // Start Services is best-effort: the VM auto-shuts down after deployment,
+            // so a service that won't come up shouldn't abort Jira ticket handling.
+            const startStep = await this.executeServiceStartStep(false);
+            steps.push(startStep);
+            if (startStep && !startStep.success) {
+                logger.warn('Start Services step failed; continuing pipeline as warning', {
+                    error: startStep.message
+                });
+                await this.notifications.sendNotification('warning', this.notificationData({
+                    warning: `Start Services step failed (non-blocking): ${startStep.message}`
+                }));
+            }
+
             steps.push(await this.executeConfiguredStep('Jira Ticket Transitions', this.enableJiraStep, () => this.jira.execute(mergeCandidates), 'ENABLE_JIRA_STEP=false'));
 
             const results = this.buildResults(steps);
