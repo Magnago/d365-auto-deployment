@@ -101,6 +101,7 @@ ENVIRONMENT_TYPE=auto                             # auto, local, or cloud
 ```env
 ENABLE_TFVC_STEP=true
 ENABLE_BUILD_STEP=true
+ENABLE_PREFLIGHT_BUILD=true                       # compile before merging; abort if already broken
 ENABLE_SYNC_STEP=true
 ENABLE_REPORTS_STEP=true
 SKIP_TFVC_MERGE_OPERATIONS=false                  # true = skip merge, only get latest on target
@@ -118,9 +119,20 @@ SERVICE_COMMAND_TIMEOUT_MS=300000
 **Notifications:**
 
 ```env
-TEAMS_WEBHOOK_URL=https://outlook.office.com/webhook/your-webhook-url
+TEAMS_WEBHOOK_URL=https://<env>.environment.api.powerplatform.com/powerautomate/...
 NOTIFICATION_ENABLED=true
+TEAMS_REQUEST_TIMEOUT_MS=10000                    # optional, default 10000
 ```
+
+The webhook must be a **Teams Workflows (Power Automate)** URL: in the target channel
+choose `...` > `Workflows` > *"Post to a channel when a webhook request is received"*.
+
+Legacy Office 365 connector URLs (`*.webhook.office.com`, `*.outlook.office.com`) are retired
+and are **rejected on startup**. They answer `2xx` and silently discard every card, so a dead
+connector is indistinguishable from a working one — the pipeline refuses them rather than
+reporting deliveries that never happened.
+
+Verify delivery at any time with `npm run notify:test`.
 
 **Timeouts (milliseconds):**
 
@@ -186,14 +198,30 @@ The pipeline executes these steps in sequence:
 1. **Initialize** - Generate deployment ID, validate configuration
 2. **Send Start Notification** - Post "Deployment Started" to Teams
 3. **Stop Services** - Run `SERVICE_STOP_COMMANDS` to free locked DLLs *(if enabled)*
-4. **TFVC Operation** *(if enabled)*
+4. **Pre-flight Build Check** - Compile the target branch as it currently stands *(if enabled)*.
+   If it fails the run aborts **before** any TFVC operation, so a broken build cannot collect
+   another night's changesets on top of itself. See *Recovering from a broken build* below.
+5. **TFVC Operation** *(if enabled)*
    - **Full merge mode:** Get latest from source → merge into target → check for conflicts → bump descriptor version → check in → get latest on target
    - **Skip merge mode** (`SKIP_TFVC_MERGE_OPERATIONS=true`): Get latest on target branch only
-5. **Build** - Compile the D365 model using `xppc.exe` *(if enabled)*
-6. **Database Sync** - Run `SyncEngine.exe` with `syncmode=fullall` against AxDB *(if enabled)*
-7. **Deploy Reports** - Execute `DeployAllReportsToSSRS.ps1` *(if enabled)*
-8. **Start Services** - Run `SERVICE_START_COMMANDS` (always attempted, even on failure)
-9. **Completion Notification** - Post success or failure to Teams with execution time and error details
+6. **Build** - Compile the D365 model using `xppc.exe` *(if enabled)*
+7. **Database Sync** - Run `SyncEngine.exe` with `syncmode=fullall` against AxDB *(if enabled)*
+8. **Deploy Reports** - Execute `DeployAllReportsToSSRS.ps1` *(if enabled)*
+9. **Start Services** - Run `SERVICE_START_COMMANDS` (always attempted, even on failure)
+10. **Completion Notification** - Post success or failure to Teams with execution time and error details
+
+### Recovering from a broken build
+
+The pre-flight check is a hard gate, so once the target branch does not compile it will also
+block the changeset that *repairs* it. To let the fix through, run once with the gate off:
+
+```env
+ENABLE_PREFLIGHT_BUILD=false
+```
+
+Then set it back to `true`. Build failure notifications carry the actual `xppc.exe` diagnostics
+(extracted from `<MODEL>.BuildModelResult.err.xml`), so the Teams card names the missing
+artifact instead of showing only a phase timing table.
 
 Each step can be independently enabled/disabled via `ENABLE_*_STEP` environment variables. On failure, the pipeline attempts to restart services before sending the failure notification.
 
@@ -207,6 +235,7 @@ Each step can be independently enabled/disabled via `ENABLE_*_STEP` environment 
 | `npm run build` | Build only | Compile the D365 model |
 | `npm run sync` | Sync only | Run database synchronization |
 | `npm run reports` | Reports only | Deploy SSRS reports |
+| `npm run notify:test` | Webhook test | Post a test card to Teams and print the HTTP status. Takes `success` (default), `failure`, `warning` or `start` |
 | `npm run build:exe` | Package | Build standalone Windows executable |
 
 ## Project Structure
@@ -261,6 +290,20 @@ Run `npm run tfvc:auth` to diagnose authentication issues. Common problems:
 - Verify `xppc.exe` exists in `PackagesLocalDirectory\bin`
 - Check that the model name matches the descriptor file
 - Review build logs in the `logs/` directory
+- `xppc.exe` writes diagnostics to `<MODEL>.BuildModelResult.err.xml` and
+  `<MODEL>.BuildModelResult.log` inside the model folder, **not** to stdout. The usual cause of
+  a sudden break is an incomplete check-in: a table or class referencing an EDT, enum or
+  security duty that was never checked in alongside it
+- A failing **Pre-flight Build Check** means the target branch was already broken before this
+  run and nothing was merged — see *Recovering from a broken build*
+
+### Teams Notifications
+
+- Run `npm run notify:test` to exercise the webhook end to end; it prints the HTTP status
+- `HTTP 202` plus nothing in the channel means the webhook is not bound to the channel you are
+  watching — recreate the Workflows trigger
+- A startup error about a *retired Office 365 connector* means `TEAMS_WEBHOOK_URL` is still a
+  `*.webhook.office.com` connector URL and must be replaced with a Workflows URL
 
 ### Database Sync Issues
 

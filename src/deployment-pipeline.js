@@ -30,6 +30,7 @@ class DeploymentPipeline {
 
         this.enableTfvcStep = this.getEnvFlag('ENABLE_TFVC_STEP', true);
         this.enableBuildStep = this.getEnvFlag('ENABLE_BUILD_STEP', true);
+        this.enablePreflightBuild = this.getEnvFlag('ENABLE_PREFLIGHT_BUILD', true);
         this.enableSyncStep = this.getEnvFlag('ENABLE_SYNC_STEP', true);
         this.enableReportsStep = this.getEnvFlag('ENABLE_REPORTS_STEP', true);
         this.skipTfvcMergeOperations = this.getEnvFlag('SKIP_TFVC_MERGE_OPERATIONS', false);
@@ -75,6 +76,11 @@ class DeploymentPipeline {
             await this.notifications.sendNotification('start', this.notificationData());
 
             steps.push(await this.executeServiceStopStep());
+
+            // Confirm the target branch still compiles as it stands before touching
+            // TFVC. A build that is already broken must not collect another night's
+            // changesets on top of it.
+            steps.push(await this.executePreflightBuildStep());
 
             // TFVC merge with hasChanges detection
             if (this.enableTfvcStep) {
@@ -241,6 +247,26 @@ class DeploymentPipeline {
         const result = await this.executeStep(name, fn);
         if (!result.success) {
             throw new Error(result.message);
+        }
+        return result;
+    }
+
+    async executePreflightBuildStep() {
+        if (!this.enablePreflightBuild) {
+            return this.createSkippedStep('Pre-flight Build Check', 'ENABLE_PREFLIGHT_BUILD=false');
+        }
+        if (!this.enableBuildStep) {
+            return this.createSkippedStep('Pre-flight Build Check', 'ENABLE_BUILD_STEP=false');
+        }
+
+        const result = await this.executeStep('Pre-flight Build Check', () => this.build.execute());
+        if (!result.success) {
+            throw new Error(
+                'Pre-flight build failed: the target branch does not compile as it currently stands, '
+                + 'so the TFVC merge was skipped to keep more changesets off a broken build. '
+                + 'Fix the source and rerun, or set ENABLE_PREFLIGHT_BUILD=false to let the changeset '
+                + `that repairs the build through.\n\n${result.message}`
+            );
         }
         return result;
     }

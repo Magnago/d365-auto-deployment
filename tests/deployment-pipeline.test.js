@@ -103,6 +103,7 @@ function clearEnv() {
         'NOTIFICATION_ENABLED', 'ENABLE_SERVICE_CONTROL',
         'ENABLE_TFVC_STEP', 'ENABLE_BUILD_STEP', 'ENABLE_SYNC_STEP',
         'ENABLE_REPORTS_STEP', 'SKIP_TFVC_MERGE_OPERATIONS',
+        'ENABLE_PREFLIGHT_BUILD',
         'SERVICE_STOP_COMMANDS', 'SERVICE_START_COMMANDS',
         'SUPPRESS_STEP_NOTIFICATIONS',
     ];
@@ -140,7 +141,12 @@ describe('Full pipeline — happy path', () => {
 
         expect(results.success).toBe(true);
         expect(mockTfvcExecute).toHaveBeenCalledTimes(1);
-        expect(mockBuildExecute).toHaveBeenCalledTimes(1);
+        // Pre-flight build check + Full Build
+        expect(mockBuildExecute).toHaveBeenCalledTimes(2);
+
+        const orderedSteps = results.steps.map(s => s.name);
+        expect(orderedSteps.indexOf('Pre-flight Build Check'))
+            .toBeLessThan(orderedSteps.indexOf('TFVC / Branch Operation'));
         expect(mockSyncExecute).toHaveBeenCalledTimes(1);
         expect(mockReportsExecute).toHaveBeenCalledTimes(1);
 
@@ -212,7 +218,8 @@ describe('No changes after merge', () => {
 
         expect(results.hasChanges).toBe(false);
         expect(results.message).toMatch(/no changes/i);
-        expect(mockBuildExecute).not.toHaveBeenCalled();
+        // Only the pre-flight check ran; Full Build was never reached
+        expect(mockBuildExecute).toHaveBeenCalledTimes(1);
         expect(mockSyncExecute).not.toHaveBeenCalled();
         expect(mockReportsExecute).not.toHaveBeenCalled();
 
@@ -237,7 +244,7 @@ describe('No changes after merge', () => {
         const results = await pipeline.execute();
 
         expect(results.success).toBe(true);
-        expect(mockBuildExecute).toHaveBeenCalledTimes(1);
+        expect(mockBuildExecute).toHaveBeenCalledTimes(2);
     });
 });
 
@@ -254,7 +261,8 @@ describe('TFVC step failure (e.g. conflicts)', () => {
 
         await expect(pipeline.execute()).rejects.toThrow(/conflict/i);
 
-        expect(mockBuildExecute).not.toHaveBeenCalled();
+        // Pre-flight ran and passed; Full Build was never reached
+        expect(mockBuildExecute).toHaveBeenCalledTimes(1);
         expect(mockSyncExecute).not.toHaveBeenCalled();
         expect(mockReportsExecute).not.toHaveBeenCalled();
 
@@ -287,6 +295,81 @@ describe('Build step failure', () => {
 
         const types = mockSendNotification.mock.calls.map(c => c[0]);
         expect(types).toContain('failure');
+    });
+});
+
+// ============================================================================
+// 5b. Pre-flight build gate — a broken build must not collect more changesets
+// ============================================================================
+describe('Pre-flight build gate', () => {
+    test('a failing pre-flight build stops the run before any TFVC operation', async () => {
+        mockBuildExecute.mockRejectedValueOnce(
+            new Error('X++ build failed for NMBPP with 13 error(s): 1. [Metadata] EdtDoesNotExist')
+        );
+
+        const pipeline = new DeploymentPipeline();
+
+        await expect(pipeline.execute()).rejects.toThrow(/Pre-flight build failed/i);
+
+        // Nothing was merged or promoted
+        expect(mockTfvcExecute).not.toHaveBeenCalled();
+        expect(mockSyncExecute).not.toHaveBeenCalled();
+        expect(mockReportsExecute).not.toHaveBeenCalled();
+        expect(mockBuildExecute).toHaveBeenCalledTimes(1);
+    });
+
+    test('the failure notification names the gate and carries the compile errors', async () => {
+        mockBuildExecute.mockRejectedValueOnce(
+            new Error("X++ build failed for NMBPP with 13 error(s): 1. [Metadata] Extended data type 'NmbWmsInventTransferAutoReceive' does not exist.")
+        );
+
+        const pipeline = new DeploymentPipeline();
+        await expect(pipeline.execute()).rejects.toThrow();
+
+        const failureCall = mockSendNotification.mock.calls.find(c => c[0] === 'failure');
+        expect(failureCall[1].failedStep).toBe('Pre-flight Build Check');
+        expect(failureCall[1].error).toMatch(/NmbWmsInventTransferAutoReceive/);
+        expect(failureCall[1].error).toMatch(/ENABLE_PREFLIGHT_BUILD=false/);
+    });
+
+    test('ENABLE_PREFLIGHT_BUILD=false lets a repairing changeset through', async () => {
+        setEnv({ ENABLE_PREFLIGHT_BUILD: 'false' });
+
+        mockTfvcExecute.mockResolvedValue({
+            success: true, message: 'merged',
+            details: { hasChanges: true },
+        });
+        mockBuildExecute.mockResolvedValue({ success: true });
+        mockSyncExecute.mockResolvedValue({ success: true });
+        mockReportsExecute.mockResolvedValue({ success: true });
+
+        const pipeline = new DeploymentPipeline();
+        const results = await pipeline.execute();
+
+        expect(results.success).toBe(true);
+        expect(mockTfvcExecute).toHaveBeenCalledTimes(1);
+        // Full Build only — the gate was skipped
+        expect(mockBuildExecute).toHaveBeenCalledTimes(1);
+
+        const preflight = results.steps.find(s => s.name === 'Pre-flight Build Check');
+        expect(preflight.details.reason).toBe('ENABLE_PREFLIGHT_BUILD=false');
+    });
+
+    test('ENABLE_BUILD_STEP=false also skips the gate', async () => {
+        setEnv({ ENABLE_BUILD_STEP: 'false' });
+
+        mockTfvcExecute.mockResolvedValue({
+            success: true, message: 'merged',
+            details: { hasChanges: true },
+        });
+        mockSyncExecute.mockResolvedValue({ success: true });
+        mockReportsExecute.mockResolvedValue({ success: true });
+
+        const pipeline = new DeploymentPipeline();
+        const results = await pipeline.execute();
+
+        expect(results.success).toBe(true);
+        expect(mockBuildExecute).not.toHaveBeenCalled();
     });
 });
 
