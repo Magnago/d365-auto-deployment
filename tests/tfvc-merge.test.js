@@ -376,9 +376,10 @@ describe('Merge with changes — descriptor bump on source, then merge', () => {
         expect(fs.readFileSync).toHaveBeenCalled();
         expect(fs.writeFileSync).toHaveBeenCalled();
 
-        // Written content should have bumped revision from 100 → 101
+        // Written content should have bumped revision from 100 → 200
+        // (incrementRevision pads to 5 digits, increments the leading 3, keeps the trailing 2)
         const writtenContent = fs.writeFileSync.mock.calls[0][1];
-        expect(writtenContent).toContain('101');
+        expect(writtenContent).toContain('<VersionRevision>200</VersionRevision>');
     });
 });
 
